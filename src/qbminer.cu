@@ -552,6 +552,35 @@ static std::vector<uint8_t> make_header76(const Job &job, const std::string &ex1
   return h;
 }
 
+static void append_field(std::vector<uint8_t> &out, const std::vector<uint8_t> &field, bool reverse) {
+  if (reverse) out.insert(out.end(), field.rbegin(), field.rend());
+  else out.insert(out.end(), field.begin(), field.end());
+}
+
+static std::vector<uint8_t> make_header76_variant(
+    const Job &job,
+    const std::string &ex1,
+    const std::string &ex2,
+    bool rev_version,
+    bool rev_prev,
+    bool rev_merkle,
+    bool rev_ntime,
+    bool rev_nbits) {
+  std::vector<uint8_t> h;
+  auto version = hex_to_bytes(job.version);
+  auto prev = hex_to_bytes(job.prevhash);
+  auto merkle = merkle_root(job, ex1, ex2);
+  auto ntime = hex_to_bytes(job.ntime);
+  auto nbits = hex_to_bytes(job.nbits);
+  h.reserve(76);
+  append_field(h, version, rev_version);
+  append_field(h, prev, rev_prev);
+  append_field(h, merkle, rev_merkle);
+  append_field(h, ntime, rev_ntime);
+  append_field(h, nbits, rev_nbits);
+  return h;
+}
+
 static Options parse_args(int argc, char **argv) {
   Options o;
   for (int i = 1; i < argc; i++) {
@@ -607,6 +636,16 @@ static std::string reversed_hex(const uint8_t *data, size_t len) {
   std::vector<uint8_t> rev(data, data + len);
   std::reverse(rev.begin(), rev.end());
   return bytes_to_hex(rev);
+}
+
+static bool display_hash_meets_target(const uint8_t hash[32], const uint8_t target[32]) {
+  for (int i = 0; i < 32; i++) {
+    uint8_t hb = hash[31 - i];
+    uint8_t tb = target[i];
+    if (hb < tb) return true;
+    if (hb > tb) return false;
+  }
+  return true;
 }
 
 static std::string with_gpu_worker(const std::string &user, int device, bool multi_gpu) {
@@ -955,6 +994,50 @@ static int run_device(Options opt, int device, bool multi_gpu) {
           event_log << "hash_raw=" << bytes_to_hex(cpu_hash, 32) << "\n";
           event_log << "hash_reversed=" << reversed_hex(cpu_hash, 32) << "\n";
           event_log << "target=" << bytes_to_hex(target_bytes, 32) << "\n";
+          event_log << "variant_passes_begin\n";
+          int variant_passes = 0;
+          for (int rv = 0; rv <= 1; rv++) {
+            for (int rp = 0; rp <= 1; rp++) {
+              for (int rm = 0; rm <= 1; rm++) {
+                for (int rt = 0; rt <= 1; rt++) {
+                  for (int rb = 0; rb <= 1; rb++) {
+                    auto hp = make_header76_variant(job, ex1, ex2, rv, rp, rm, rt, rb);
+                    for (int nonce_mode = 0; nonce_mode <= 1; nonce_mode++) {
+                      std::vector<uint8_t> vh = hp;
+                      if (nonce_mode == 0) {
+                        vh.push_back((uint8_t)(h_res.nonce & 0xff));
+                        vh.push_back((uint8_t)((h_res.nonce >> 8) & 0xff));
+                        vh.push_back((uint8_t)((h_res.nonce >> 16) & 0xff));
+                        vh.push_back((uint8_t)((h_res.nonce >> 24) & 0xff));
+                      } else {
+                        vh.push_back((uint8_t)((h_res.nonce >> 24) & 0xff));
+                        vh.push_back((uint8_t)((h_res.nonce >> 16) & 0xff));
+                        vh.push_back((uint8_t)((h_res.nonce >> 8) & 0xff));
+                        vh.push_back((uint8_t)(h_res.nonce & 0xff));
+                      }
+                      uint8_t vh_hash[32];
+                      dsha256(vh, vh_hash);
+                      if (display_hash_meets_target(vh_hash, target_bytes)) {
+                        variant_passes++;
+                        event_log << "variant_pass"
+                                  << " rev_version=" << rv
+                                  << " rev_prev=" << rp
+                                  << " rev_merkle=" << rm
+                                  << " rev_ntime=" << rt
+                                  << " rev_nbits=" << rb
+                                  << " nonce_mode=" << (nonce_mode == 0 ? "le" : "be")
+                                  << " hash_reversed=" << reversed_hex(vh_hash, 32)
+                                  << " header_hex=" << bytes_to_hex(vh)
+                                  << "\n";
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          event_log << "variant_passes_count=" << variant_passes << "\n";
+          event_log << "variant_passes_end\n";
           event_log << timestamp() << " [gpu" << opt.device << "] DEBUG_SHARE_END\n";
           event_log.flush();
         }
