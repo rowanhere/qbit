@@ -12,17 +12,6 @@ permissions:
 jobs:
   linux-cuda:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        include:
-          - name: blackwell-rtx50
-            arch: sm_120
-          - name: ada-rtx40
-            arch: sm_89
-          - name: ampere-rtx30
-            arch: sm_86
-          - name: turing-rtx20
-            arch: sm_75
     steps:
       - uses: actions/checkout@v4
       - uses: Jimver/cuda-toolkit@v0.2.21
@@ -32,17 +21,32 @@ jobs:
       - name: Build
         run: |
           make clean
-          make NVCC=/usr/local/cuda/bin/nvcc ARCH=${{ matrix.arch }}
-          mkdir -p dist
-          cp qbminer dist/qbminer-linux-x86_64-${{ matrix.name }}
-          tar -C dist -czf qbminer-linux-x86_64-${{ matrix.name }}.tar.gz qbminer-linux-x86_64-${{ matrix.name }}
+          make NVCC=/usr/local/cuda/bin/nvcc GENCODE="75 86 89 120"
+          mkdir -p dist/qbminer-linux-x86_64-cuda12
+          cp qbminer dist/qbminer-linux-x86_64-cuda12/qbminer
+          cp README.md dist/qbminer-linux-x86_64-cuda12/README.md
+          tar -C dist -czf qbminer-linux-x86_64-cuda12.tar.gz qbminer-linux-x86_64-cuda12
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qbminer-linux-x86_64-${{ matrix.name }}
-          path: qbminer-linux-x86_64-${{ matrix.name }}.tar.gz
+          name: qbminer-linux-x86_64-cuda12
+          path: qbminer-linux-x86_64-cuda12.tar.gz
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: qbminer-linux-x86_64-${{ matrix.name }}.tar.gz
+          name: qbminer ${{ github.ref_name }}
+          body: |
+            qbminer Linux CUDA release.
+
+            Asset:
+            - `qbminer-linux-x86_64-cuda12.tar.gz`
+
+            Contains one `qbminer` executable built with CUDA 12.8 fatbin support for:
+            - Turing / RTX 20xx / T4: sm_75
+            - Ampere / RTX 30xx / A-series: sm_86
+            - Ada / RTX 40xx: sm_89
+            - Blackwell / RTX 50xx / RTX PRO 6000 Blackwell: sm_120
+
+            Requires a compatible NVIDIA driver on Linux x86_64.
+          files: qbminer-linux-x86_64-cuda12.tar.gz

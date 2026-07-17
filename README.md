@@ -4,7 +4,30 @@ Minimal CUDA Stratum miner for Qbit PRISM pool SHA256d mining.
 
 This is purpose-built for Qbit/PRISM and avoids the old ccminer dependency tree.
 
-## Quick Start
+## Release Binary
+
+Download the release asset:
+
+```text
+qbminer-linux-x86_64-cuda12.tar.gz
+```
+
+Use it:
+
+```bash
+tar -xzf qbminer-linux-x86_64-cuda12.tar.gz
+cd qbminer-linux-x86_64-cuda12
+chmod +x qbminer
+./qbminer \
+  -o mine.prismpool.io:4335 \
+  -u qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps \
+  -p d=64
+```
+
+The release binary is one executable with CUDA fatbin support for common NVIDIA
+GPUs: Turing `sm_75`, Ampere `sm_86`, Ada `sm_89`, and Blackwell `sm_120`.
+
+## Build From Source
 
 On the VPS:
 
@@ -66,5 +89,5 @@ RTX 40xx / Ada:       sm_89
 RTX 50xx / Blackwell: sm_120, requires CUDA 12.8+
 ```
 
-Prebuilt binaries are architecture-specific. Source builds are preferred on new
-GPU generations because the installed CUDA toolkit must support that GPU.
+The release binary is multi-arch. Source builds are still useful if you want to
+tune flags or compile for a GPU generation not included in the release.
