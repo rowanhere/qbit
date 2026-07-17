@@ -221,6 +221,19 @@ static bool parse_subscribe(const std::string &line, std::string &ex1, int &ex2_
   size_t r = line.find("\"result\"");
   if (r == std::string::npos) return false;
 
+  size_t compact = line.find("[[]", r);
+  if (compact != std::string::npos) {
+    size_t q1 = line.find('"', compact);
+    if (q1 == std::string::npos) return false;
+    size_t q2 = line.find('"', q1 + 1);
+    if (q2 == std::string::npos) return false;
+    ex1 = line.substr(q1 + 1, q2 - q1 - 1);
+    size_t comma = line.find(',', q2 + 1);
+    if (comma == std::string::npos) return false;
+    ex2_size = atoi(line.c_str() + comma + 1);
+    return !ex1.empty() && ex2_size > 0 && ex2_size < 16;
+  }
+
   // Handles both:
   // [[["mining.notify","..."],["mining.set_difficulty","..."]],"extranonce1",4]
   // [[], "extranonce1", 8]
@@ -378,13 +391,16 @@ int main(int argc, char **argv) {
   int ex2_size = 0;
   while (recv_line(fd, line)) {
     std::cout << "< " << line << "\n";
-    if (line.find("\"id\":1") != std::string::npos && parse_subscribe(line, ex1, ex2_size)) break;
+    if (line.find("\"id\": 1") != std::string::npos || line.find("\"id\":1") != std::string::npos) {
+      if (parse_subscribe(line, ex1, ex2_size)) break;
+      std::cerr << "failed to parse subscribe response\n";
+    }
   }
   if (ex1.empty()) {
     std::cerr << "subscribe failed\n";
     return 1;
   }
-  std::cout << "extranonce1=" << ex1 << " extranonce2_size=" << ex2_size << "\n";
+  std::cout << "extranonce1=" << ex1 << " extranonce2_size=" << ex2_size << std::endl;
 
   std::ostringstream auth;
   auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
