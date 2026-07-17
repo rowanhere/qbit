@@ -76,6 +76,13 @@ Optional flags:
   -d <device>        CUDA device id; omit to use all GPUs
   -b <blocks>        CUDA blocks per launch, default 131072
   -t <threads>       CUDA threads per block, default 256
+  --no-dashboard     plain log output instead of the live terminal dashboard
+```
+
+For log files or services, use:
+
+```bash
+./qbminer --no-dashboard -o mine.prismpool.io:4335 -u YOUR_QBIT_ADDRESS.worker -p d=64
 ```
 
 ## Architecture Notes

@@ -3,6 +3,7 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <csignal>
 #include <unistd.h>
 
 #include <atomic>
@@ -30,6 +31,7 @@ struct Options {
   int device = -1;
   int blocks = 131072;
   int threads = 256;
+  bool dashboard = true;
 };
 
 static std::mutex log_mutex;
@@ -54,6 +56,18 @@ static std::string dashboard_pool;
 static std::string dashboard_user;
 static std::chrono::steady_clock::time_point dashboard_started;
 static std::atomic<bool> dashboard_done{false};
+static bool dashboard_interactive = true;
+
+static void restore_terminal() {
+  if (dashboard_interactive) {
+    std::cout << "\033[?25h\033[?1049l" << std::flush;
+  }
+}
+
+static void handle_signal(int sig) {
+  restore_terminal();
+  std::_Exit(128 + sig);
+}
 
 struct Job {
   std::string id, prevhash, coinb1, coinb2, version, nbits, ntime;
@@ -541,9 +555,11 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "-d") o.device = atoi(next().c_str());
     else if (a == "-b") o.blocks = atoi(next().c_str());
     else if (a == "-t") o.threads = atoi(next().c_str());
+    else if (a == "--no-dashboard") o.dashboard = false;
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads]\n"
-                << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n";
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard]\n"
+                << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
+                << "Use --no-dashboard for plain one-line log output.\n";
       exit(0);
     }
   }
@@ -577,11 +593,19 @@ static std::string format_elapsed(uint64_t seconds) {
 static void log_line(int device, const std::string &msg) {
   std::lock_guard<std::mutex> lock(log_mutex);
   if (device >= 0 && device < (int)gpu_stats.size()) {
-    gpu_stats[device].last_event = msg;
+    if (msg.rfind("speed ", 0) != 0) {
+      gpu_stats[device].last_event = msg;
+    }
+  }
+  if (!dashboard_interactive) {
+    std::cout << "[gpu" << device << "] " << msg << std::endl;
   }
 }
 
 static void dashboard_loop() {
+  if (dashboard_interactive) {
+    std::cout << "\033[?1049h\033[?25l" << std::flush;
+  }
   while (!dashboard_done.load()) {
     std::vector<GpuStats> snap;
     {
@@ -605,7 +629,7 @@ static void dashboard_loop() {
     double avg_mhps = elapsed > 0 ? (double)total_hashes / (double)elapsed / 1e6 : 0.0;
 
     std::ostringstream out;
-    out << "\033[2J\033[H";
+    out << "\033[H\033[2J";
     out << "qbminer - Qbit PRISM CUDA miner\n";
     out << "Pool: " << dashboard_pool << "    Address/worker: " << dashboard_user << "\n";
     out << "Uptime: " << format_elapsed(elapsed)
@@ -623,8 +647,9 @@ static void dashboard_loop() {
         << std::setw(10) << "Diff"
         << std::setw(10) << "Acc/Rej"
         << std::setw(11) << "Submitted"
+        << std::setw(18) << "Job"
         << std::setw(13) << "Status"
-        << "Last event\n";
+        << "Event\n";
     out << std::string(110, '-') << "\n";
 
     for (size_t i = 0; i < snap.size(); i++) {
@@ -637,12 +662,16 @@ static void dashboard_loop() {
           << std::setw(10) << (uint64_t)g.difficulty
           << std::setw(10) << accrej
           << std::setw(11) << g.submitted
+          << std::setw(18) << g.last_job.substr(0, 17)
           << std::setw(13) << g.status.substr(0, 12)
           << g.last_event.substr(0, 80) << "\n";
     }
 
     std::cout << out.str() << std::flush;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+  if (dashboard_interactive) {
+    std::cout << "\033[?25h\033[?1049l" << std::flush;
   }
 }
 
@@ -730,8 +759,8 @@ static int run_device(Options opt, int device, bool multi_gpu) {
             std::lock_guard<std::mutex> lock(log_mutex);
             gpu_stats[opt.device].last_job = job.id;
             gpu_stats[opt.device].status = "mining";
+            gpu_stats[opt.device].last_event = "new work";
           }
-          log_line(opt.device, "job " + job.id + " received, branches " + std::to_string(job.branches.size()));
           ex2_counter = 0;
         } else {
           log_line(opt.device, "failed to parse notify: " + line);
@@ -834,6 +863,12 @@ static int run_device(Options opt, int device, bool multi_gpu) {
 
 int main(int argc, char **argv) {
   Options opt = parse_args(argc, argv);
+  dashboard_interactive = opt.dashboard && isatty(STDOUT_FILENO);
+  if (dashboard_interactive) {
+    std::atexit(restore_terminal);
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+  }
   int count = 0;
   CUDA_CHECK(cudaGetDeviceCount(&count));
   if (count <= 0) {
@@ -850,10 +885,11 @@ int main(int argc, char **argv) {
     dashboard_user = opt.user;
     dashboard_started = std::chrono::steady_clock::now();
     gpu_stats.assign(count, GpuStats{});
-    std::thread dashboard(dashboard_loop);
+    std::thread dashboard;
+    if (dashboard_interactive) dashboard = std::thread(dashboard_loop);
     int rc = run_device(opt, opt.device, false);
     dashboard_done = true;
-    dashboard.join();
+    if (dashboard.joinable()) dashboard.join();
     return rc;
   }
 
@@ -861,7 +897,8 @@ int main(int argc, char **argv) {
   dashboard_user = opt.user;
   dashboard_started = std::chrono::steady_clock::now();
   gpu_stats.assign(count, GpuStats{});
-  std::thread dashboard(dashboard_loop);
+  std::thread dashboard;
+  if (dashboard_interactive) dashboard = std::thread(dashboard_loop);
   std::vector<std::thread> threads;
   std::atomic<int> failures{0};
   for (int d = 0; d < count; d++) {
@@ -872,6 +909,6 @@ int main(int argc, char **argv) {
   }
   for (auto &t : threads) t.join();
   dashboard_done = true;
-  dashboard.join();
+  if (dashboard.joinable()) dashboard.join();
   return failures.load() == 0 ? 0 : 1;
 }
