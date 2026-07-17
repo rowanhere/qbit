@@ -16,12 +16,12 @@ install_packages() {
   fi
 
   $SUDO apt-get update
-  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential ca-certificates git make
 
   if ! command -v nvcc >/dev/null 2>&1 && [ ! -x /usr/local/cuda/bin/nvcc ]; then
-    $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-8 || \
-    $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-cuda-toolkit
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-toolkit-12-8 || \
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-cuda-toolkit
   fi
 }
 
