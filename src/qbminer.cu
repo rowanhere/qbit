@@ -167,11 +167,20 @@ __device__ static bool hash_meets_target(const uint8_t h[32], const uint8_t targ
   return true;
 }
 
+__device__ static uint8_t word_be_byte(uint32_t w, int byte_index) {
+  return (uint8_t)(w >> ((3 - byte_index) * 8));
+}
+
 __device__ static bool hash_words_meet_target(const uint32_t h[8], const uint32_t target[8]) {
+  // Bitcoin-style displayed hash is the byte-reversal of the SHA256d digest.
+  // Stratum difficulty target is compared against that displayed big-endian value.
   #pragma unroll
-  for (int i = 0; i < 8; i++) {
-    if (h[i] < target[i]) return true;
-    if (h[i] > target[i]) return false;
+  for (int i = 0; i < 32; i++) {
+    int digest_index = 31 - i;
+    uint8_t hb = word_be_byte(h[digest_index / 4], digest_index % 4);
+    uint8_t tb = word_be_byte(target[i / 4], i % 4);
+    if (hb < tb) return true;
+    if (hb > tb) return false;
   }
   return true;
 }
