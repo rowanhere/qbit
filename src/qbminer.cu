@@ -26,7 +26,7 @@ struct Options {
   std::string user = "qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps";
   std::string pass = "x";
   int device = 0;
-  int blocks = 8192;
+  int blocks = 32768;
   int threads = 256;
 };
 
@@ -39,6 +39,11 @@ struct Job {
 struct GpuResult {
   uint32_t found;
   uint32_t nonce;
+};
+
+struct WorkData {
+  uint32_t midstate[8];
+  uint32_t tail[3];
 };
 
 __host__ __device__ static inline uint32_t rotr32(uint32_t x, uint32_t n) {
@@ -73,6 +78,41 @@ __host__ __device__ static void sha256_compress(uint32_t s[8], const uint8_t blo
   }
 
   uint32_t a=s[0], b=s[1], c=s[2], d=s[3], e=s[4], f=s[5], g=s[6], h=s[7];
+  for (int i = 0; i < 64; i++) {
+    uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+    uint32_t ch = (e & f) ^ ((~e) & g);
+    uint32_t t1 = h + S1 + ch + K256[i] + w[i];
+    uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+    uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t t2 = S0 + maj;
+    h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+  }
+  s[0]+=a; s[1]+=b; s[2]+=c; s[3]+=d; s[4]+=e; s[5]+=f; s[6]+=g; s[7]+=h;
+}
+
+__host__ __device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
+  const uint32_t K256[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+  };
+  uint32_t w[64];
+  #pragma unroll
+  for (int i = 0; i < 16; i++) w[i] = w0[i];
+  #pragma unroll
+  for (int i = 16; i < 64; i++) {
+    uint32_t s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ (w[i-15] >> 3);
+    uint32_t s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ (w[i-2] >> 10);
+    w[i] = w[i-16] + s0 + w[i-7] + s1;
+  }
+
+  uint32_t a=s[0], b=s[1], c=s[2], d=s[3], e=s[4], f=s[5], g=s[6], h=s[7];
+  #pragma unroll
   for (int i = 0; i < 64; i++) {
     uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
     uint32_t ch = (e & f) ^ ((~e) & g);
@@ -127,24 +167,46 @@ __device__ static bool hash_meets_target(const uint8_t h[32], const uint8_t targ
   return true;
 }
 
-__global__ void mine_kernel(const uint8_t *prefix76, const uint8_t *target, uint32_t start_nonce, GpuResult *res) {
+__device__ static bool hash_words_meet_target(const uint32_t h[8], const uint32_t target[8]) {
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    if (h[i] < target[i]) return true;
+    if (h[i] > target[i]) return false;
+  }
+  return true;
+}
+
+__global__ void mine_kernel(const WorkData *work, const uint32_t *target, uint32_t start_nonce, GpuResult *res) {
   uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint32_t nonce = start_nonce + idx;
   if (res->found) return;
 
-  uint8_t header[80];
+  uint32_t s1[8];
   #pragma unroll
-  for (int i = 0; i < 76; i++) header[i] = prefix76[i];
-  header[76] = nonce & 0xff;
-  header[77] = (nonce >> 8) & 0xff;
-  header[78] = (nonce >> 16) & 0xff;
-  header[79] = (nonce >> 24) & 0xff;
+  for (int i = 0; i < 8; i++) s1[i] = work->midstate[i];
 
-  uint8_t h1[32], h2[32];
-  sha256_bytes(header, 80, h1);
-  sha256_bytes(h1, 32, h2);
+  uint32_t block2[16];
+  block2[0] = work->tail[0];
+  block2[1] = work->tail[1];
+  block2[2] = work->tail[2];
+  block2[3] = bswap32(nonce);
+  block2[4] = 0x80000000U;
+  #pragma unroll
+  for (int i = 5; i < 15; i++) block2[i] = 0;
+  block2[15] = 640;
+  sha256_compress_words(s1, block2);
 
-  if (hash_meets_target(h2, target) && atomicCAS(&res->found, 0U, 1U) == 0U) {
+  uint32_t s2[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+  uint32_t final_block[16];
+  #pragma unroll
+  for (int i = 0; i < 8; i++) final_block[i] = s1[i];
+  final_block[8] = 0x80000000U;
+  #pragma unroll
+  for (int i = 9; i < 15; i++) final_block[i] = 0;
+  final_block[15] = 256;
+  sha256_compress_words(s2, final_block);
+
+  if (hash_words_meet_target(s2, target) && atomicCAS(&res->found, 0U, 1U) == 0U) {
     res->nonce = nonce;
   }
 }
@@ -338,6 +400,26 @@ static void share_target_be(double diff, uint8_t out[32]) {
   }
 }
 
+static WorkData make_work_data(const std::vector<uint8_t> &prefix76) {
+  WorkData w{};
+  uint32_t s[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+  sha256_compress(s, prefix76.data());
+  for (int i = 0; i < 8; i++) w.midstate[i] = s[i];
+  for (int i = 0; i < 3; i++) {
+    size_t p = 64 + i * 4;
+    w.tail[i] = ((uint32_t)prefix76[p] << 24) | ((uint32_t)prefix76[p + 1] << 16) |
+                ((uint32_t)prefix76[p + 2] << 8) | prefix76[p + 3];
+  }
+  return w;
+}
+
+static void target_words_be(const uint8_t bytes[32], uint32_t words[8]) {
+  for (int i = 0; i < 8; i++) {
+    words[i] = ((uint32_t)bytes[i * 4] << 24) | ((uint32_t)bytes[i * 4 + 1] << 16) |
+               ((uint32_t)bytes[i * 4 + 2] << 8) | bytes[i * 4 + 3];
+  }
+}
+
 static int connect_tcp(const std::string &host, int port) {
   addrinfo hints{}, *res = nullptr;
   hints.ai_family = AF_UNSPEC;
@@ -467,11 +549,11 @@ int main(int argc, char **argv) {
   auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
   send_line(fd, auth.str());
 
-  uint8_t *d_prefix = nullptr;
-  uint8_t *d_target = nullptr;
+  WorkData *d_work = nullptr;
+  uint32_t *d_target = nullptr;
   GpuResult *d_res = nullptr, h_res{};
-  CUDA_CHECK(cudaMalloc(&d_prefix, 76));
-  CUDA_CHECK(cudaMalloc(&d_target, 32));
+  CUDA_CHECK(cudaMalloc(&d_work, sizeof(WorkData)));
+  CUDA_CHECK(cudaMalloc(&d_target, 8 * sizeof(uint32_t)));
   CUDA_CHECK(cudaMalloc(&d_res, sizeof(GpuResult)));
 
   Job job;
@@ -521,16 +603,19 @@ int main(int argc, char **argv) {
       std::cerr << "bad header size\n";
       return 1;
     }
-    CUDA_CHECK(cudaMemcpy(d_prefix, prefix.data(), 76, cudaMemcpyHostToDevice));
+    WorkData work = make_work_data(prefix);
+    CUDA_CHECK(cudaMemcpy(d_work, &work, sizeof(work), cudaMemcpyHostToDevice));
 
-    uint8_t target[32];
-    share_target_be(diff, target);
-    CUDA_CHECK(cudaMemcpy(d_target, target, 32, cudaMemcpyHostToDevice));
+    uint8_t target_bytes[32];
+    uint32_t target[8];
+    share_target_be(diff, target_bytes);
+    target_words_be(target_bytes, target);
+    CUDA_CHECK(cudaMemcpy(d_target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
     uint32_t batch = (uint32_t)(opt.blocks * opt.threads);
     for (uint32_t start = 0; start < 0xffffffffU; start += batch) {
       h_res.found = 0; h_res.nonce = 0;
       CUDA_CHECK(cudaMemcpy(d_res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
-      mine_kernel<<<opt.blocks, opt.threads>>>(d_prefix, d_target, start, d_res);
+      mine_kernel<<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
       CUDA_CHECK(cudaGetLastError());
       CUDA_CHECK(cudaMemcpy(&h_res, d_res, sizeof(h_res), cudaMemcpyDeviceToHost));
       hashes_since += batch;
