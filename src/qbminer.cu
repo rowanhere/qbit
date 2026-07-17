@@ -602,6 +602,18 @@ static void log_line(int device, const std::string &msg) {
   }
 }
 
+static std::string share_reject_reason(const std::string &line) {
+  if (line.find("low-difficulty") != std::string::npos || line.find("low difficulty") != std::string::npos) {
+    return "low difficulty";
+  }
+  if (line.find("duplicate") != std::string::npos) return "duplicate";
+  if (line.find("stale") != std::string::npos) return "stale";
+  if (line.find("invalid") != std::string::npos) return "invalid";
+  size_t p = line.find("\"error\"");
+  if (p != std::string::npos) return line.substr(p, std::min<size_t>(80, line.size() - p));
+  return "rejected";
+}
+
 static void dashboard_loop() {
   if (dashboard_interactive) {
     std::cout << "\033[?1049h\033[?25l" << std::flush;
@@ -776,7 +788,10 @@ static int run_device(Options opt, int device, bool multi_gpu) {
           gpu_stats[opt.device].last_event = "share stale";
         } else {
           gpu_stats[opt.device].rejected++;
-          gpu_stats[opt.device].last_event = "share rejected";
+          gpu_stats[opt.device].last_event = "share rejected: " + share_reject_reason(line);
+        }
+        if (!dashboard_interactive) {
+          std::cout << "[gpu" << opt.device << "] < " << line << std::endl;
         }
       } else {
         log_line(opt.device, "< " + line);
