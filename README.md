@@ -27,6 +27,9 @@ make NVCC=/usr/local/cuda/bin/nvcc ARCH=sm_89
 
 By default, qbminer mines on **all CUDA GPUs** it can see. Each GPU opens its own
 Stratum connection. On multi-GPU systems the worker suffix `.gpuN` is appended.
+The miner displays a live terminal dashboard with pool, address, uptime, total
+hashrate, average hashrate, per-GPU speed, accepted/rejected/stale shares, and
+the latest per-GPU event.
 
 ```bash
 ./qbminer \

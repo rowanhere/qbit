@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -32,6 +33,27 @@ struct Options {
 };
 
 static std::mutex log_mutex;
+
+struct GpuStats {
+  std::string name;
+  std::string worker;
+  std::string status = "starting";
+  std::string last_job = "-";
+  std::string last_event = "-";
+  double difficulty = 0.0;
+  double mhps = 0.0;
+  uint64_t total_hashes = 0;
+  uint64_t submitted = 0;
+  uint64_t accepted = 0;
+  uint64_t rejected = 0;
+  uint64_t stale = 0;
+};
+
+static std::vector<GpuStats> gpu_stats;
+static std::string dashboard_pool;
+static std::string dashboard_user;
+static std::chrono::steady_clock::time_point dashboard_started;
+static std::atomic<bool> dashboard_done{false};
 
 struct Job {
   std::string id, prevhash, coinb1, coinb2, version, nbits, ntime;
@@ -533,9 +555,95 @@ static std::string with_gpu_worker(const std::string &user, int device, bool mul
   return user + ".gpu" + std::to_string(device);
 }
 
+static std::string format_hashrate(double mhps) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(2);
+  if (mhps >= 1000000.0) out << (mhps / 1000000.0) << " TH/s";
+  else if (mhps >= 1000.0) out << (mhps / 1000.0) << " GH/s";
+  else out << mhps << " MH/s";
+  return out.str();
+}
+
+static std::string format_elapsed(uint64_t seconds) {
+  uint64_t h = seconds / 3600;
+  uint64_t m = (seconds % 3600) / 60;
+  uint64_t s = seconds % 60;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%02llu:%02llu:%02llu",
+           (unsigned long long)h, (unsigned long long)m, (unsigned long long)s);
+  return buf;
+}
+
 static void log_line(int device, const std::string &msg) {
   std::lock_guard<std::mutex> lock(log_mutex);
-  std::cout << "[gpu" << device << "] " << msg << std::endl;
+  if (device >= 0 && device < (int)gpu_stats.size()) {
+    gpu_stats[device].last_event = msg;
+  }
+}
+
+static void dashboard_loop() {
+  while (!dashboard_done.load()) {
+    std::vector<GpuStats> snap;
+    {
+      std::lock_guard<std::mutex> lock(log_mutex);
+      snap = gpu_stats;
+    }
+
+    double total_mhps = 0.0;
+    uint64_t total_hashes = 0, submitted = 0, accepted = 0, rejected = 0, stale = 0;
+    for (const auto &g : snap) {
+      total_mhps += g.mhps;
+      total_hashes += g.total_hashes;
+      submitted += g.submitted;
+      accepted += g.accepted;
+      rejected += g.rejected;
+      stale += g.stale;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    uint64_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - dashboard_started).count();
+    double avg_mhps = elapsed > 0 ? (double)total_hashes / (double)elapsed / 1e6 : 0.0;
+
+    std::ostringstream out;
+    out << "\033[2J\033[H";
+    out << "qbminer - Qbit PRISM CUDA miner\n";
+    out << "Pool: " << dashboard_pool << "    Address/worker: " << dashboard_user << "\n";
+    out << "Uptime: " << format_elapsed(elapsed)
+        << "    Total: " << format_hashrate(total_mhps)
+        << "    Average: " << format_hashrate(avg_mhps) << "\n";
+    out << "Shares: accepted " << accepted
+        << " | rejected " << rejected
+        << " | stale " << stale
+        << " | submitted " << submitted << "\n\n";
+
+    out << std::left
+        << std::setw(5) << "GPU"
+        << std::setw(27) << "Device"
+        << std::setw(12) << "Speed"
+        << std::setw(10) << "Diff"
+        << std::setw(10) << "Acc/Rej"
+        << std::setw(11) << "Submitted"
+        << std::setw(13) << "Status"
+        << "Last event\n";
+    out << std::string(110, '-') << "\n";
+
+    for (size_t i = 0; i < snap.size(); i++) {
+      const auto &g = snap[i];
+      std::string accrej = std::to_string(g.accepted) + "/" + std::to_string(g.rejected);
+      out << std::left
+          << std::setw(5) << ("#" + std::to_string(i))
+          << std::setw(27) << g.name.substr(0, 26)
+          << std::setw(12) << format_hashrate(g.mhps)
+          << std::setw(10) << (uint64_t)g.difficulty
+          << std::setw(10) << accrej
+          << std::setw(11) << g.submitted
+          << std::setw(13) << g.status.substr(0, 12)
+          << g.last_event.substr(0, 80) << "\n";
+    }
+
+    std::cout << out.str() << std::flush;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
 }
 
 static int run_device(Options opt, int device, bool multi_gpu) {
@@ -545,6 +653,14 @@ static int run_device(Options opt, int device, bool multi_gpu) {
   CUDA_CHECK(cudaSetDevice(opt.device));
   cudaDeviceProp prop{};
   CUDA_CHECK(cudaGetDeviceProperties(&prop, opt.device));
+  {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
+      gpu_stats[opt.device].name = prop.name;
+      gpu_stats[opt.device].worker = opt.user;
+      gpu_stats[opt.device].status = "connecting";
+    }
+  }
   log_line(opt.device, std::string("qbminer CUDA SHA256d on ") + prop.name);
   log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port));
 
@@ -569,6 +685,10 @@ static int run_device(Options opt, int device, bool multi_gpu) {
     return 1;
   }
   log_line(opt.device, "extranonce1=" + ex1 + " extranonce2_size=" + std::to_string(ex2_size));
+  {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    gpu_stats[opt.device].status = "authorizing";
+  }
 
   std::ostringstream auth;
   auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
@@ -599,13 +719,35 @@ static int run_device(Options opt, int device, bool multi_gpu) {
       }
       if (line.find("mining.set_difficulty") != std::string::npos) {
         diff = parse_difficulty(line);
+        {
+          std::lock_guard<std::mutex> lock(log_mutex);
+          gpu_stats[opt.device].difficulty = diff;
+        }
         log_line(opt.device, "difficulty " + std::to_string(diff));
       } else if (line.find("mining.notify") != std::string::npos) {
         if (parse_notify(line, job)) {
+          {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            gpu_stats[opt.device].last_job = job.id;
+            gpu_stats[opt.device].status = "mining";
+          }
           log_line(opt.device, "job " + job.id + " received, branches " + std::to_string(job.branches.size()));
           ex2_counter = 0;
         } else {
           log_line(opt.device, "failed to parse notify: " + line);
+        }
+      } else if (line.find("\"id\": 4") != std::string::npos || line.find("\"id\":4") != std::string::npos) {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        if (line.find("\"result\": true") != std::string::npos || line.find("\"result\":true") != std::string::npos) {
+          gpu_stats[opt.device].accepted++;
+          gpu_stats[opt.device].last_event = "share accepted";
+        } else if (line.find("stale") != std::string::npos) {
+          gpu_stats[opt.device].stale++;
+          gpu_stats[opt.device].rejected++;
+          gpu_stats[opt.device].last_event = "share stale";
+        } else {
+          gpu_stats[opt.device].rejected++;
+          gpu_stats[opt.device].last_event = "share rejected";
         }
       } else {
         log_line(opt.device, "< " + line);
@@ -644,12 +786,23 @@ static int run_device(Options opt, int device, bool multi_gpu) {
       CUDA_CHECK(cudaGetLastError());
       CUDA_CHECK(cudaMemcpy(&h_res, d_res, sizeof(h_res), cudaMemcpyDeviceToHost));
       hashes_since += batch;
+      {
+        std::lock_guard<std::mutex> lock(log_mutex);
+        gpu_stats[opt.device].total_hashes += batch;
+      }
 
       auto now = std::chrono::steady_clock::now();
       double sec = std::chrono::duration<double>(now - last_report).count();
       if (sec >= 5.0) {
+        double mhps = hashes_since / sec / 1e6;
+        {
+          std::lock_guard<std::mutex> lock(log_mutex);
+          gpu_stats[opt.device].mhps = mhps;
+          gpu_stats[opt.device].difficulty = diff;
+          gpu_stats[opt.device].status = "mining";
+        }
         std::ostringstream speed;
-        speed << "speed " << (hashes_since / sec / 1e6) << " MH/s diff " << diff;
+        speed << "speed " << mhps << " MH/s diff " << diff;
         log_line(opt.device, speed.str());
         hashes_since = 0;
         last_report = now;
@@ -662,6 +815,11 @@ static int run_device(Options opt, int device, bool multi_gpu) {
             << opt.user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
             << job.ntime << "\",\"" << nonce_hex << "\"]}";
         log_line(opt.device, "share nonce " + nonce_hex);
+        {
+          std::lock_guard<std::mutex> lock(log_mutex);
+          gpu_stats[opt.device].submitted++;
+          gpu_stats[opt.device].last_event = "share submitted " + nonce_hex;
+        }
         send_line(fd, sub.str());
       }
 
@@ -688,10 +846,22 @@ int main(int argc, char **argv) {
       std::cerr << "Requested GPU " << opt.device << " but only " << count << " CUDA GPU(s) found\n";
       return 1;
     }
-    return run_device(opt, opt.device, false);
+    dashboard_pool = opt.host + ":" + std::to_string(opt.port);
+    dashboard_user = opt.user;
+    dashboard_started = std::chrono::steady_clock::now();
+    gpu_stats.assign(count, GpuStats{});
+    std::thread dashboard(dashboard_loop);
+    int rc = run_device(opt, opt.device, false);
+    dashboard_done = true;
+    dashboard.join();
+    return rc;
   }
 
-  std::cout << "Detected " << count << " CUDA GPU(s); mining on all. Use -d N to select one GPU.\n";
+  dashboard_pool = opt.host + ":" + std::to_string(opt.port);
+  dashboard_user = opt.user;
+  dashboard_started = std::chrono::steady_clock::now();
+  gpu_stats.assign(count, GpuStats{});
+  std::thread dashboard(dashboard_loop);
   std::vector<std::thread> threads;
   std::atomic<int> failures{0};
   for (int d = 0; d < count; d++) {
@@ -701,5 +871,7 @@ int main(int argc, char **argv) {
     });
   }
   for (auto &t : threads) t.join();
+  dashboard_done = true;
+  dashboard.join();
   return failures.load() == 0 ? 0 : 1;
 }
