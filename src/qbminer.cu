@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -25,10 +26,12 @@ struct Options {
   int port = 4335;
   std::string user = "qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps";
   std::string pass = "x";
-  int device = 0;
+  int device = -1;
   int blocks = 131072;
   int threads = 256;
 };
+
+static std::mutex log_mutex;
 
 struct Job {
   std::string id, prevhash, coinb1, coinb2, version, nbits, ntime;
@@ -517,24 +520,37 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "-b") o.blocks = atoi(next().c_str());
     else if (a == "-t") o.threads = atoi(next().c_str());
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads]\n";
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads]\n"
+                << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n";
       exit(0);
     }
   }
   return o;
 }
 
-int main(int argc, char **argv) {
-  Options opt = parse_args(argc, argv);
+static std::string with_gpu_worker(const std::string &user, int device, bool multi_gpu) {
+  if (!multi_gpu) return user;
+  return user + ".gpu" + std::to_string(device);
+}
+
+static void log_line(int device, const std::string &msg) {
+  std::lock_guard<std::mutex> lock(log_mutex);
+  std::cout << "[gpu" << device << "] " << msg << std::endl;
+}
+
+static int run_device(Options opt, int device, bool multi_gpu) {
+  opt.device = device;
+  opt.user = with_gpu_worker(opt.user, device, multi_gpu);
+
   CUDA_CHECK(cudaSetDevice(opt.device));
   cudaDeviceProp prop{};
   CUDA_CHECK(cudaGetDeviceProperties(&prop, opt.device));
-  std::cout << "qbminer CUDA SHA256d on " << prop.name << "\n";
-  std::cout << "Connecting to " << opt.host << ":" << opt.port << "\n";
+  log_line(opt.device, std::string("qbminer CUDA SHA256d on ") + prop.name);
+  log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port));
 
   int fd = connect_tcp(opt.host, opt.port);
   if (fd < 0) {
-    std::cerr << "connect failed\n";
+    log_line(opt.device, "connect failed");
     return 1;
   }
 
@@ -542,17 +558,17 @@ int main(int argc, char **argv) {
   std::string line, ex1;
   int ex2_size = 0;
   while (recv_line(fd, line)) {
-    std::cout << "< " << line << "\n";
+    log_line(opt.device, "< " + line);
     if (line.find("\"id\": 1") != std::string::npos || line.find("\"id\":1") != std::string::npos) {
       if (parse_subscribe(line, ex1, ex2_size)) break;
-      std::cerr << "failed to parse subscribe response\n";
+      log_line(opt.device, "failed to parse subscribe response");
     }
   }
   if (ex1.empty()) {
-    std::cerr << "subscribe failed\n";
+    log_line(opt.device, "subscribe failed");
     return 1;
   }
-  std::cout << "extranonce1=" << ex1 << " extranonce2_size=" << ex2_size << std::endl;
+  log_line(opt.device, "extranonce1=" + ex1 + " extranonce2_size=" + std::to_string(ex2_size));
 
   std::ostringstream auth;
   auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
@@ -578,21 +594,21 @@ int main(int argc, char **argv) {
     timeval tv{0, 1000};
     if (select(fd + 1, &rfds, nullptr, nullptr, &tv) > 0) {
       if (!recv_line(fd, line)) {
-        std::cerr << "pool disconnected\n";
+        log_line(opt.device, "pool disconnected");
         return 1;
       }
       if (line.find("mining.set_difficulty") != std::string::npos) {
         diff = parse_difficulty(line);
-        std::cout << "difficulty " << diff << "\n";
+        log_line(opt.device, "difficulty " + std::to_string(diff));
       } else if (line.find("mining.notify") != std::string::npos) {
         if (parse_notify(line, job)) {
-          std::cout << "job " << job.id << " received, branches " << job.branches.size() << "\n";
+          log_line(opt.device, "job " + job.id + " received, branches " + std::to_string(job.branches.size()));
           ex2_counter = 0;
         } else {
-          std::cerr << "failed to parse notify: " << line << "\n";
+          log_line(opt.device, "failed to parse notify: " + line);
         }
       } else {
-        std::cout << "< " << line << "\n";
+        log_line(opt.device, "< " + line);
       }
     }
 
@@ -609,7 +625,7 @@ int main(int argc, char **argv) {
     std::string ex2 = ex2ss.str();
     auto prefix = make_header76(job, ex1, ex2);
     if (prefix.size() != 76) {
-      std::cerr << "bad header size\n";
+      log_line(opt.device, "bad header size");
       return 1;
     }
     WorkData work = make_work_data(prefix);
@@ -632,7 +648,9 @@ int main(int argc, char **argv) {
       auto now = std::chrono::steady_clock::now();
       double sec = std::chrono::duration<double>(now - last_report).count();
       if (sec >= 5.0) {
-        std::cout << "speed " << (hashes_since / sec / 1e6) << " MH/s diff " << diff << "\n";
+        std::ostringstream speed;
+        speed << "speed " << (hashes_since / sec / 1e6) << " MH/s diff " << diff;
+        log_line(opt.device, speed.str());
         hashes_since = 0;
         last_report = now;
       }
@@ -643,7 +661,7 @@ int main(int argc, char **argv) {
         sub << "{\"id\":4,\"method\":\"mining.submit\",\"params\":[\""
             << opt.user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
             << job.ntime << "\",\"" << nonce_hex << "\"]}";
-        std::cout << "share nonce " << nonce_hex << "\n";
+        log_line(opt.device, "share nonce " + nonce_hex);
         send_line(fd, sub.str());
       }
 
@@ -654,4 +672,34 @@ int main(int argc, char **argv) {
     }
     ex2_counter++;
   }
+}
+
+int main(int argc, char **argv) {
+  Options opt = parse_args(argc, argv);
+  int count = 0;
+  CUDA_CHECK(cudaGetDeviceCount(&count));
+  if (count <= 0) {
+    std::cerr << "No CUDA GPUs found\n";
+    return 1;
+  }
+
+  if (opt.device >= 0) {
+    if (opt.device >= count) {
+      std::cerr << "Requested GPU " << opt.device << " but only " << count << " CUDA GPU(s) found\n";
+      return 1;
+    }
+    return run_device(opt, opt.device, false);
+  }
+
+  std::cout << "Detected " << count << " CUDA GPU(s); mining on all. Use -d N to select one GPU.\n";
+  std::vector<std::thread> threads;
+  std::atomic<int> failures{0};
+  for (int d = 0; d < count; d++) {
+    threads.emplace_back([&, d]() {
+      int rc = run_device(opt, d, count > 1);
+      if (rc != 0) failures++;
+    });
+  }
+  for (auto &t : threads) t.join();
+  return failures.load() == 0 ? 0 : 1;
 }
