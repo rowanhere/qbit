@@ -21,7 +21,7 @@ chmod +x qbminer
 ./qbminer \
   -o mine.prismpool.io:4335 \
   -u qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps \
-  -p d=64
+  -p x
 ```
 
 The release binary is one executable with CUDA fatbin support for common NVIDIA
@@ -82,8 +82,12 @@ Optional flags:
 For log files or services, use:
 
 ```bash
-./qbminer --no-dashboard -o mine.prismpool.io:4335 -u YOUR_QBIT_ADDRESS.worker -p d=64
+./qbminer --no-dashboard -o mine.prismpool.io:4335 -u YOUR_QBIT_ADDRESS.worker -p x
 ```
+
+Password `x` uses normal PRISM vardiff behavior. For short testing only, a pool
+may accept a difficulty request like `-p d=64`, but normal mining should use
+`-p x`.
 
 ## Architecture Notes
 
