@@ -221,11 +221,22 @@ static bool parse_subscribe(const std::string &line, std::string &ex1, int &ex2_
   size_t r = line.find("\"result\"");
   if (r == std::string::npos) return false;
 
-  // Typical Stratum result:
+  // Handles both:
   // [[["mining.notify","..."],["mining.set_difficulty","..."]],"extranonce1",4]
-  size_t end_subs = line.find("]]", r);
-  if (end_subs == std::string::npos) return false;
-  size_t q1 = line.find('"', end_subs + 2);
+  // [[], "extranonce1", 8]
+  size_t result_array = line.find('[', r);
+  if (result_array == std::string::npos) return false;
+  size_t q1 = line.find('"', result_array);
+  while (q1 != std::string::npos) {
+    size_t q2_probe = line.find('"', q1 + 1);
+    if (q2_probe == std::string::npos) return false;
+    std::string candidate = line.substr(q1 + 1, q2_probe - q1 - 1);
+    if (!candidate.empty() && candidate.find('.') == std::string::npos &&
+        candidate.find("mining") == std::string::npos) {
+      break;
+    }
+    q1 = line.find('"', q2_probe + 1);
+  }
   if (q1 == std::string::npos) return false;
   size_t q2 = line.find('"', q1 + 1);
   if (q2 == std::string::npos) return false;
