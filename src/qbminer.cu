@@ -34,7 +34,7 @@ struct Options {
   int threads = 256;
   bool dashboard = true;
   std::string log_file = "qbminer.log";
-  double share_factor = 256.0;
+  double share_factor = 1.0;
 };
 
 static std::mutex log_mutex;
@@ -543,8 +543,8 @@ static std::vector<uint8_t> make_header76(const Job &job, const std::string &ex1
   auto nbits = hex_to_bytes(job.nbits);
   h.reserve(76);
   h.insert(h.end(), version.rbegin(), version.rend());
-  h.insert(h.end(), prev.begin(), prev.end());
-  h.insert(h.end(), merkle.begin(), merkle.end());
+  h.insert(h.end(), prev.rbegin(), prev.rend());
+  h.insert(h.end(), merkle.rbegin(), merkle.rend());
   h.insert(h.end(), ntime.rbegin(), ntime.rend());
   h.insert(h.end(), nbits.rbegin(), nbits.rend());
   return h;
@@ -577,7 +577,7 @@ static Options parse_args(int argc, char **argv) {
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
                 << "Use --no-dashboard for plain one-line log output.\n"
                 << "Default log file: qbminer.log\n"
-                << "Default share-factor: 256, making local share checks stricter to avoid low-difficulty rejects.\n";
+                << "Default share-factor: 1.\n";
       exit(0);
     }
   }
