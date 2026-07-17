@@ -910,7 +910,8 @@ static int run_device(Options opt, int device, bool multi_gpu) {
       }
 
       if (h_res.found) {
-        std::string nonce_hex = le_hex(h_res.nonce);
+        std::string nonce_header_hex = le_hex(h_res.nonce);
+        std::string nonce_submit_hex = u32_hex(h_res.nonce);
         std::vector<uint8_t> header = prefix;
         header.push_back((uint8_t)(h_res.nonce & 0xff));
         header.push_back((uint8_t)((h_res.nonce >> 8) & 0xff));
@@ -921,12 +922,12 @@ static int run_device(Options opt, int device, bool multi_gpu) {
         std::ostringstream sub;
         sub << "{\"id\":4,\"method\":\"mining.submit\",\"params\":[\""
             << opt.user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
-            << job.ntime << "\",\"" << nonce_hex << "\"]}";
-        log_line(opt.device, "share nonce " + nonce_hex);
+            << job.ntime << "\",\"" << nonce_submit_hex << "\"]}";
+        log_line(opt.device, "share nonce " + nonce_submit_hex);
         {
           std::lock_guard<std::mutex> lock(log_mutex);
           gpu_stats[opt.device].submitted++;
-          gpu_stats[opt.device].last_event = "share submitted " + nonce_hex;
+          gpu_stats[opt.device].last_event = "share submitted " + nonce_submit_hex;
         }
         if (opt.debug_shares && event_log.is_open()) {
           event_log << timestamp() << " [gpu" << opt.device << "] DEBUG_SHARE_BEGIN\n";
@@ -937,7 +938,8 @@ static int run_device(Options opt, int device, bool multi_gpu) {
           event_log << "extranonce1=" << ex1 << "\n";
           event_log << "extranonce2=" << ex2 << "\n";
           event_log << "ntime=" << job.ntime << "\n";
-          event_log << "nonce_le=" << nonce_hex << "\n";
+          event_log << "nonce_header_le=" << nonce_header_hex << "\n";
+          event_log << "nonce_submit=" << nonce_submit_hex << "\n";
           event_log << "nonce_u32=" << h_res.nonce << "\n";
           event_log << "submit=" << sub.str() << "\n";
           event_log << "version=" << job.version << "\n";
