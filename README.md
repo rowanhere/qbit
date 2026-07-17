@@ -78,6 +78,7 @@ Optional flags:
   -t <threads>       CUDA threads per block, default 256
   --no-dashboard     plain log output instead of the live terminal dashboard
   --log-file <path>  event log file, default qbminer.log
+  --share-factor <n> local share check strictness, default 256
 ```
 
 For log files or services, use:
@@ -96,6 +97,10 @@ tail -f qbminer.log
 Password `x` uses normal PRISM vardiff behavior. For short testing only, a pool
 may accept a difficulty request like `-p d=64`, but normal mining should use
 `-p x`.
+
+If you see pool rejections with `low difficulty share`, increase
+`--share-factor`. If accepted shares are too rare and there are no low-difficulty
+rejections, lower it.
 
 ## Architecture Notes
 

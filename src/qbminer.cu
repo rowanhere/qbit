@@ -34,6 +34,7 @@ struct Options {
   int threads = 256;
   bool dashboard = true;
   std::string log_file = "qbminer.log";
+  double share_factor = 256.0;
 };
 
 static std::mutex log_mutex;
@@ -570,11 +571,13 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "-t") o.threads = atoi(next().c_str());
     else if (a == "--no-dashboard") o.dashboard = false;
     else if (a == "--log-file") o.log_file = next();
+    else if (a == "--share-factor") o.share_factor = atof(next().c_str());
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path]\n"
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path] [--share-factor n]\n"
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
                 << "Use --no-dashboard for plain one-line log output.\n"
-                << "Default log file: qbminer.log\n";
+                << "Default log file: qbminer.log\n"
+                << "Default share-factor: 256, making local share checks stricter to avoid low-difficulty rejects.\n";
       exit(0);
     }
   }
@@ -847,7 +850,7 @@ static int run_device(Options opt, int device, bool multi_gpu) {
 
     uint8_t target_bytes[32];
     uint32_t target[8];
-    share_target_be(diff, target_bytes);
+    share_target_be(diff * opt.share_factor, target_bytes);
     target_words_be(target_bytes, target);
     CUDA_CHECK(cudaMemcpy(d_target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
     uint32_t batch = (uint32_t)(opt.blocks * opt.threads);
