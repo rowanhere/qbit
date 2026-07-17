@@ -11,7 +11,7 @@ NVCC_ARCH_FLAGS := $(foreach cc,$(GENCODE),-gencode arch=compute_$(cc),code=sm_$
 endif
 
 NVCCFLAGS ?= -O3 -std=c++17 $(NVCC_ARCH_FLAGS) -lineinfo -cudart=static
-LDFLAGS ?= -pthread
+LDFLAGS ?= -Xcompiler -pthread
 
 all: $(TARGET)
 
