@@ -119,7 +119,15 @@ static void dsha256(const std::vector<uint8_t> &in, uint8_t out[32]) {
   sha256_bytes(tmp, 32, out);
 }
 
-__global__ void mine_kernel(const uint8_t *prefix76, uint32_t start_nonce, uint32_t target_top32, GpuResult *res) {
+__device__ static bool hash_meets_target(const uint8_t h[32], const uint8_t target[32]) {
+  for (int i = 0; i < 32; i++) {
+    if (h[i] < target[i]) return true;
+    if (h[i] > target[i]) return false;
+  }
+  return true;
+}
+
+__global__ void mine_kernel(const uint8_t *prefix76, const uint8_t *target, uint32_t start_nonce, GpuResult *res) {
   uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint32_t nonce = start_nonce + idx;
   if (res->found) return;
@@ -136,8 +144,7 @@ __global__ void mine_kernel(const uint8_t *prefix76, uint32_t start_nonce, uint3
   sha256_bytes(header, 80, h1);
   sha256_bytes(h1, 32, h2);
 
-  uint32_t top = ((uint32_t)h2[31] << 24) | ((uint32_t)h2[30] << 16) | ((uint32_t)h2[29] << 8) | h2[28];
-  if (top <= target_top32 && atomicCAS(&res->found, 0U, 1U) == 0U) {
+  if (hash_meets_target(h2, target) && atomicCAS(&res->found, 0U, 1U) == 0U) {
     res->nonce = nonce;
   }
 }
@@ -301,12 +308,34 @@ static double parse_difficulty(const std::string &line) {
   return atof(line.c_str() + p + 1);
 }
 
-static uint32_t share_target_top32(double diff) {
+static void share_target_be(double diff, uint8_t out[32]) {
+  for (int i = 0; i < 32; i++) out[i] = 0;
   if (diff <= 0) diff = 1.0;
-  double t = 0x0000ffffu / diff;
-  if (t < 1.0) t = 1.0;
-  if (t > 0xffffffffu) t = 0xffffffffu;
-  return (uint32_t)t;
+
+  // Bitcoin/Stratum difficulty-1 target:
+  // 00000000ffff0000000000000000000000000000000000000000000000000000
+  unsigned __int128 words[4] = {0x00000000ffff0000ULL, 0, 0, 0};
+  uint64_t d = (uint64_t)(diff + 0.5);
+  if (d == 0) d = 1;
+
+  unsigned __int128 rem = 0;
+  for (int i = 0; i < 4; i++) {
+    unsigned __int128 cur = (rem << 64) | words[i];
+    words[i] = cur / d;
+    rem = cur % d;
+  }
+
+  for (int i = 0; i < 4; i++) {
+    uint64_t w = (uint64_t)words[i];
+    out[i * 8 + 0] = (uint8_t)(w >> 56);
+    out[i * 8 + 1] = (uint8_t)(w >> 48);
+    out[i * 8 + 2] = (uint8_t)(w >> 40);
+    out[i * 8 + 3] = (uint8_t)(w >> 32);
+    out[i * 8 + 4] = (uint8_t)(w >> 24);
+    out[i * 8 + 5] = (uint8_t)(w >> 16);
+    out[i * 8 + 6] = (uint8_t)(w >> 8);
+    out[i * 8 + 7] = (uint8_t)w;
+  }
 }
 
 static int connect_tcp(const std::string &host, int port) {
@@ -439,8 +468,10 @@ int main(int argc, char **argv) {
   send_line(fd, auth.str());
 
   uint8_t *d_prefix = nullptr;
+  uint8_t *d_target = nullptr;
   GpuResult *d_res = nullptr, h_res{};
   CUDA_CHECK(cudaMalloc(&d_prefix, 76));
+  CUDA_CHECK(cudaMalloc(&d_target, 32));
   CUDA_CHECK(cudaMalloc(&d_res, sizeof(GpuResult)));
 
   Job job;
@@ -492,12 +523,14 @@ int main(int argc, char **argv) {
     }
     CUDA_CHECK(cudaMemcpy(d_prefix, prefix.data(), 76, cudaMemcpyHostToDevice));
 
-    uint32_t target_top = share_target_top32(diff);
+    uint8_t target[32];
+    share_target_be(diff, target);
+    CUDA_CHECK(cudaMemcpy(d_target, target, 32, cudaMemcpyHostToDevice));
     uint32_t batch = (uint32_t)(opt.blocks * opt.threads);
     for (uint32_t start = 0; start < 0xffffffffU; start += batch) {
       h_res.found = 0; h_res.nonce = 0;
       CUDA_CHECK(cudaMemcpy(d_res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
-      mine_kernel<<<opt.blocks, opt.threads>>>(d_prefix, start, target_top, d_res);
+      mine_kernel<<<opt.blocks, opt.threads>>>(d_prefix, d_target, start, d_res);
       CUDA_CHECK(cudaGetLastError());
       CUDA_CHECK(cudaMemcpy(&h_res, d_res, sizeof(h_res), cudaMemcpyDeviceToHost));
       hashes_since += batch;
