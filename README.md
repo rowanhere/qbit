@@ -77,12 +77,20 @@ Optional flags:
   -b <blocks>        CUDA blocks per launch, default 131072
   -t <threads>       CUDA threads per block, default 256
   --no-dashboard     plain log output instead of the live terminal dashboard
+  --log-file <path>  event log file, default qbminer.log
 ```
 
 For log files or services, use:
 
 ```bash
 ./qbminer --no-dashboard -o mine.prismpool.io:4335 -u YOUR_QBIT_ADDRESS.worker -p x
+```
+
+To keep the dashboard and still store clean share/pool events:
+
+```bash
+./qbminer -o mine.prismpool.io:4335 -u YOUR_QBIT_ADDRESS.worker -p x --log-file qbminer.log
+tail -f qbminer.log
 ```
 
 Password `x` uses normal PRISM vardiff behavior. For short testing only, a pool

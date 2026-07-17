@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -32,9 +33,11 @@ struct Options {
   int blocks = 131072;
   int threads = 256;
   bool dashboard = true;
+  std::string log_file = "qbminer.log";
 };
 
 static std::mutex log_mutex;
+static std::ofstream event_log;
 
 struct GpuStats {
   std::string name;
@@ -67,6 +70,16 @@ static void restore_terminal() {
 static void handle_signal(int sig) {
   restore_terminal();
   std::_Exit(128 + sig);
+}
+
+static std::string timestamp() {
+  auto now = std::chrono::system_clock::now();
+  std::time_t t = std::chrono::system_clock::to_time_t(now);
+  std::tm tm{};
+  localtime_r(&t, &tm);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+  return buf;
 }
 
 struct Job {
@@ -556,10 +569,12 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "-b") o.blocks = atoi(next().c_str());
     else if (a == "-t") o.threads = atoi(next().c_str());
     else if (a == "--no-dashboard") o.dashboard = false;
+    else if (a == "--log-file") o.log_file = next();
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard]\n"
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path]\n"
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
-                << "Use --no-dashboard for plain one-line log output.\n";
+                << "Use --no-dashboard for plain one-line log output.\n"
+                << "Default log file: qbminer.log\n";
       exit(0);
     }
   }
@@ -599,6 +614,10 @@ static void log_line(int device, const std::string &msg) {
   }
   if (!dashboard_interactive) {
     std::cout << "[gpu" << device << "] " << msg << std::endl;
+  }
+  if (event_log.is_open()) {
+    event_log << timestamp() << " [gpu" << device << "] " << msg << "\n";
+    event_log.flush();
   }
 }
 
@@ -779,19 +798,28 @@ static int run_device(Options opt, int device, bool multi_gpu) {
         }
       } else if (line.find("\"id\": 4") != std::string::npos || line.find("\"id\":4") != std::string::npos) {
         std::lock_guard<std::mutex> lock(log_mutex);
+        std::string verdict;
         if (line.find("\"result\": true") != std::string::npos || line.find("\"result\":true") != std::string::npos) {
           gpu_stats[opt.device].accepted++;
-          gpu_stats[opt.device].last_event = "share accepted";
+          verdict = "share accepted";
+          gpu_stats[opt.device].last_event = verdict;
         } else if (line.find("stale") != std::string::npos) {
           gpu_stats[opt.device].stale++;
           gpu_stats[opt.device].rejected++;
-          gpu_stats[opt.device].last_event = "share stale";
+          verdict = "share stale";
+          gpu_stats[opt.device].last_event = verdict;
         } else {
           gpu_stats[opt.device].rejected++;
-          gpu_stats[opt.device].last_event = "share rejected: " + share_reject_reason(line);
+          verdict = "share rejected: " + share_reject_reason(line);
+          gpu_stats[opt.device].last_event = verdict;
         }
         if (!dashboard_interactive) {
           std::cout << "[gpu" << opt.device << "] < " << line << std::endl;
+        }
+        if (event_log.is_open()) {
+          event_log << timestamp() << " [gpu" << opt.device << "] " << verdict << "\n";
+          event_log << timestamp() << " [gpu" << opt.device << "] < " << line << "\n";
+          event_log.flush();
         }
       } else {
         log_line(opt.device, "< " + line);
@@ -886,6 +914,13 @@ static int run_device(Options opt, int device, bool multi_gpu) {
 int main(int argc, char **argv) {
   Options opt = parse_args(argc, argv);
   dashboard_interactive = opt.dashboard && isatty(STDOUT_FILENO);
+  if (!opt.log_file.empty()) {
+    event_log.open(opt.log_file, std::ios::app);
+    if (!event_log) {
+      std::cerr << "Could not open log file: " << opt.log_file << "\n";
+      return 1;
+    }
+  }
   if (dashboard_interactive) {
     std::atexit(restore_terminal);
     std::signal(SIGINT, handle_signal);
