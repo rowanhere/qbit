@@ -26,7 +26,7 @@ struct Options {
   std::string user = "qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps";
   std::string pass = "x";
   int device = 0;
-  int blocks = 32768;
+  int blocks = 131072;
   int threads = 256;
 };
 

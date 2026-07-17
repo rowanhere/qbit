@@ -36,7 +36,7 @@ Optional flags:
 
 ```text
   -d <device>        CUDA device id, default 0
-  -b <blocks>        CUDA blocks per launch, default 8192
+  -b <blocks>        CUDA blocks per launch, default 131072
   -t <threads>       CUDA threads per block, default 256
 ```
 
