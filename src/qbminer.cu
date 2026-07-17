@@ -196,25 +196,57 @@ static std::vector<std::string> quoted_strings(const std::string &s) {
   return out;
 }
 
+static std::string json_array_after_key(const std::string &s, const std::string &key) {
+  size_t k = s.find("\"" + key + "\"");
+  if (k == std::string::npos) return "";
+  size_t p = s.find('[', k);
+  if (p == std::string::npos) return "";
+
+  bool in_string = false;
+  bool escaped = false;
+  int depth = 0;
+  for (size_t i = p; i < s.size(); i++) {
+    char c = s[i];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_string = true;
+    } else if (c == '[') {
+      depth++;
+    } else if (c == ']') {
+      depth--;
+      if (depth == 0) return s.substr(p, i - p + 1);
+    }
+  }
+  return "";
+}
+
 static bool parse_notify(const std::string &line, Job &job) {
-  auto q = quoted_strings(line);
-  if (q.size() < 9) return false;
-  size_t m = 0;
-  while (m < q.size() && q[m] != "mining.notify") m++;
-  if (m == q.size() || m + 8 >= q.size()) return false;
-  job.id = q[m+1];
-  job.prevhash = q[m+2];
-  job.coinb1 = q[m+3];
-  job.coinb2 = q[m+4];
+  std::string params = json_array_after_key(line, "params");
+  auto q = quoted_strings(params);
+  if (q.size() < 7) return false;
+
+  job.id = q[0];
+  job.prevhash = q[1];
+  job.coinb1 = q[2];
+  job.coinb2 = q[3];
   job.branches.clear();
-  size_t i = m + 5;
-  while (i + 3 < q.size() && q[i].size() == 64) job.branches.push_back(q[i++]);
-  if (i + 3 >= q.size()) return false;
-  job.version = q[i++];
-  job.nbits = q[i++];
-  job.ntime = q[i++];
+  for (size_t i = 4; i + 3 < q.size(); i++) job.branches.push_back(q[i]);
+
+  job.version = q[q.size() - 3];
+  job.nbits = q[q.size() - 2];
+  job.ntime = q[q.size() - 1];
   job.clean = line.find("true", line.find(job.ntime)) != std::string::npos;
-  return true;
+  return job.prevhash.size() == 64 && job.version.size() == 8 &&
+         job.nbits.size() == 8 && job.ntime.size() == 8;
 }
 
 static bool parse_subscribe(const std::string &line, std::string &ex1, int &ex2_size) {
@@ -432,7 +464,7 @@ int main(int argc, char **argv) {
         std::cout << "difficulty " << diff << "\n";
       } else if (line.find("mining.notify") != std::string::npos) {
         if (parse_notify(line, job)) {
-          std::cout << "job " << job.id << " height/update received\n";
+          std::cout << "job " << job.id << " received, branches " << job.branches.size() << "\n";
           ex2_counter = 0;
         } else {
           std::cerr << "failed to parse notify: " << line << "\n";
