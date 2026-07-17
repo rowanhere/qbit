@@ -79,6 +79,7 @@ Optional flags:
   --no-dashboard     plain log output instead of the live terminal dashboard
   --log-file <path>  event log file, default qbminer.log
   --share-factor <n> local share check strictness, default 1
+  --debug-shares     log submitted header/hash/target details
 ```
 
 For log files or services, use:
@@ -99,7 +100,8 @@ may accept a difficulty request like `-p d=64`, but normal mining should use
 `-p x`.
 
 If you see pool rejections with `low difficulty share`, report the raw
-`"id":4` response from `qbminer.log`.
+`"id":4` response from `qbminer.log`. Add `--debug-shares` to include the
+submitted header, hash, target, nonce, and submit JSON in the log.
 
 ## Architecture Notes
 

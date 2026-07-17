@@ -6,6 +6,7 @@
 #include <csignal>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -35,6 +36,7 @@ struct Options {
   bool dashboard = true;
   std::string log_file = "qbminer.log";
   double share_factor = 1.0;
+  bool debug_shares = false;
 };
 
 static std::mutex log_mutex;
@@ -572,16 +574,39 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "--no-dashboard") o.dashboard = false;
     else if (a == "--log-file") o.log_file = next();
     else if (a == "--share-factor") o.share_factor = atof(next().c_str());
+    else if (a == "--debug-shares") o.debug_shares = true;
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path] [--share-factor n]\n"
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path] [--share-factor n] [--debug-shares]\n"
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
                 << "Use --no-dashboard for plain one-line log output.\n"
                 << "Default log file: qbminer.log\n"
-                << "Default share-factor: 1.\n";
+                << "Default share-factor: 1.\n"
+                << "Use --debug-shares to log header/hash/target for submitted shares.\n";
       exit(0);
     }
   }
   return o;
+}
+
+static std::string bytes_to_hex(const uint8_t *data, size_t len) {
+  static const char *hex = "0123456789abcdef";
+  std::string out;
+  out.resize(len * 2);
+  for (size_t i = 0; i < len; i++) {
+    out[i * 2] = hex[data[i] >> 4];
+    out[i * 2 + 1] = hex[data[i] & 15];
+  }
+  return out;
+}
+
+static std::string bytes_to_hex(const std::vector<uint8_t> &data) {
+  return bytes_to_hex(data.data(), data.size());
+}
+
+static std::string reversed_hex(const uint8_t *data, size_t len) {
+  std::vector<uint8_t> rev(data, data + len);
+  std::reverse(rev.begin(), rev.end());
+  return bytes_to_hex(rev);
 }
 
 static std::string with_gpu_worker(const std::string &user, int device, bool multi_gpu) {
@@ -886,6 +911,13 @@ static int run_device(Options opt, int device, bool multi_gpu) {
 
       if (h_res.found) {
         std::string nonce_hex = le_hex(h_res.nonce);
+        std::vector<uint8_t> header = prefix;
+        header.push_back((uint8_t)(h_res.nonce & 0xff));
+        header.push_back((uint8_t)((h_res.nonce >> 8) & 0xff));
+        header.push_back((uint8_t)((h_res.nonce >> 16) & 0xff));
+        header.push_back((uint8_t)((h_res.nonce >> 24) & 0xff));
+        uint8_t cpu_hash[32];
+        dsha256(header, cpu_hash);
         std::ostringstream sub;
         sub << "{\"id\":4,\"method\":\"mining.submit\",\"params\":[\""
             << opt.user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
@@ -895,6 +927,34 @@ static int run_device(Options opt, int device, bool multi_gpu) {
           std::lock_guard<std::mutex> lock(log_mutex);
           gpu_stats[opt.device].submitted++;
           gpu_stats[opt.device].last_event = "share submitted " + nonce_hex;
+        }
+        if (opt.debug_shares && event_log.is_open()) {
+          event_log << timestamp() << " [gpu" << opt.device << "] DEBUG_SHARE_BEGIN\n";
+          event_log << "worker=" << opt.user << "\n";
+          event_log << "job=" << job.id << "\n";
+          event_log << "difficulty=" << diff << "\n";
+          event_log << "share_factor=" << opt.share_factor << "\n";
+          event_log << "extranonce1=" << ex1 << "\n";
+          event_log << "extranonce2=" << ex2 << "\n";
+          event_log << "ntime=" << job.ntime << "\n";
+          event_log << "nonce_le=" << nonce_hex << "\n";
+          event_log << "nonce_u32=" << h_res.nonce << "\n";
+          event_log << "submit=" << sub.str() << "\n";
+          event_log << "version=" << job.version << "\n";
+          event_log << "prevhash=" << job.prevhash << "\n";
+          event_log << "nbits=" << job.nbits << "\n";
+          event_log << "coinb1=" << job.coinb1 << "\n";
+          event_log << "coinb2=" << job.coinb2 << "\n";
+          event_log << "merkle_branches=" << job.branches.size() << "\n";
+          for (size_t bi = 0; bi < job.branches.size(); bi++) {
+            event_log << "branch" << bi << "=" << job.branches[bi] << "\n";
+          }
+          event_log << "header_hex=" << bytes_to_hex(header) << "\n";
+          event_log << "hash_raw=" << bytes_to_hex(cpu_hash, 32) << "\n";
+          event_log << "hash_reversed=" << reversed_hex(cpu_hash, 32) << "\n";
+          event_log << "target=" << bytes_to_hex(target_bytes, 32) << "\n";
+          event_log << timestamp() << " [gpu" << opt.device << "] DEBUG_SHARE_END\n";
+          event_log.flush();
         }
         send_line(fd, sub.str());
       }
