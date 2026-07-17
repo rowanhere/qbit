@@ -808,7 +808,8 @@ static int run_device(Options opt, int device, bool multi_gpu) {
     target_words_be(target_bytes, target);
     CUDA_CHECK(cudaMemcpy(d_target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
     uint32_t batch = (uint32_t)(opt.blocks * opt.threads);
-    for (uint32_t start = 0; start < 0xffffffffU; start += batch) {
+    for (uint64_t start64 = 0; start64 < 0x100000000ULL; start64 += batch) {
+      uint32_t start = (uint32_t)start64;
       h_res.found = 0; h_res.nonce = 0;
       CUDA_CHECK(cudaMemcpy(d_res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
       mine_kernel<<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
@@ -858,6 +859,12 @@ static int run_device(Options opt, int device, bool multi_gpu) {
       if (select(fd + 1, &rfds, nullptr, nullptr, &tv2) > 0) break;
     }
     ex2_counter++;
+    {
+      std::lock_guard<std::mutex> lock(log_mutex);
+      if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
+        gpu_stats[opt.device].last_event = "next extranonce " + std::to_string(ex2_counter);
+      }
+    }
   }
 }
 
