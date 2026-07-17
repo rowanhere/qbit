@@ -15,15 +15,19 @@ jobs:
     strategy:
       matrix:
         include:
+          - name: blackwell-rtx50
+            arch: sm_120
           - name: ada-rtx40
             arch: sm_89
           - name: ampere-rtx30
             arch: sm_86
+          - name: turing-rtx20
+            arch: sm_75
     steps:
       - uses: actions/checkout@v4
       - uses: Jimver/cuda-toolkit@v0.2.21
         with:
-          cuda: "12.4.1"
+          cuda: "12.8.0"
           method: network
       - name: Build
         run: |
