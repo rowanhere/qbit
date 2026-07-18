@@ -718,7 +718,7 @@ static void dashboard_loop() {
   }
 }
 
-static int run_device(Options opt, int device, bool multi_gpu) {
+static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
   opt.device = device;
   opt.user = with_gpu_worker(opt.user, device, multi_gpu);
 
@@ -775,7 +775,9 @@ static int run_device(Options opt, int device, bool multi_gpu) {
 
   Job job;
   double diff = 1.0;
-  uint64_t ex2_counter = 0;
+  const uint64_t ex2_start = multi_gpu ? (uint64_t)device : 0;
+  const uint64_t ex2_stride = multi_gpu ? (uint64_t)gpu_count : 1;
+  uint64_t ex2_counter = ex2_start;
   auto last_report = std::chrono::steady_clock::now();
   uint64_t hashes_since = 0;
 
@@ -804,7 +806,7 @@ static int run_device(Options opt, int device, bool multi_gpu) {
             gpu_stats[opt.device].status = "mining";
             gpu_stats[opt.device].last_event = "new work";
           }
-          ex2_counter = 0;
+          ex2_counter = ex2_start;
         } else {
           log_line(opt.device, "failed to parse notify: " + line);
         }
@@ -921,6 +923,8 @@ static int run_device(Options opt, int device, bool multi_gpu) {
           event_log << "share_factor=" << opt.share_factor << "\n";
           event_log << "extranonce1=" << ex1 << "\n";
           event_log << "extranonce2=" << ex2 << "\n";
+          event_log << "extranonce2_lane_start=" << ex2_start << "\n";
+          event_log << "extranonce2_lane_stride=" << ex2_stride << "\n";
           event_log << "ntime=" << job.ntime << "\n";
           event_log << "nonce_header_le=" << nonce_header_hex << "\n";
           event_log << "nonce_submit=" << nonce_submit_hex << "\n";
@@ -952,7 +956,7 @@ static int run_device(Options opt, int device, bool multi_gpu) {
       timeval tv2{0, 0};
       if (select(fd + 1, &rfds, nullptr, nullptr, &tv2) > 0) break;
     }
-    ex2_counter++;
+    ex2_counter += ex2_stride;
     {
       std::lock_guard<std::mutex> lock(log_mutex);
       if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
@@ -995,7 +999,7 @@ int main(int argc, char **argv) {
     gpu_stats.assign(count, GpuStats{});
     std::thread dashboard;
     if (dashboard_interactive) dashboard = std::thread(dashboard_loop);
-    int rc = run_device(opt, opt.device, false);
+    int rc = run_device(opt, opt.device, false, 1);
     dashboard_done = true;
     if (dashboard.joinable()) dashboard.join();
     return rc;
@@ -1011,7 +1015,7 @@ int main(int argc, char **argv) {
   std::atomic<int> failures{0};
   for (int d = 0; d < count; d++) {
     threads.emplace_back([&, d]() {
-      int rc = run_device(opt, d, count > 1);
+      int rc = run_device(opt, d, count > 1, count);
       if (rc != 0) failures++;
     });
   }
