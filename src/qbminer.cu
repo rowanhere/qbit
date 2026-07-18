@@ -31,7 +31,7 @@ struct Options {
   std::string user = "qb1zhqwu3s35yyrfsqlr42snrzx7xwgdqhx89vdaupdc4nuyt95y8v4qxttk86.4090vps";
   std::string pass = "x";
   int device = -1;
-  int blocks = 262144;
+  int blocks = 131072;
   int threads = 256;
   bool dashboard = true;
   std::string log_file = "qbminer.log";
@@ -101,11 +101,11 @@ struct WorkData {
   uint32_t tail[3];
 };
 
-__host__ __device__ __forceinline__ static uint32_t rotr32(uint32_t x, uint32_t n) {
+__host__ __device__ static inline uint32_t rotr32(uint32_t x, uint32_t n) {
   return (x >> n) | (x << (32 - n));
 }
 
-__host__ __device__ __forceinline__ static uint32_t bswap32(uint32_t x) {
+__host__ __device__ static inline uint32_t bswap32(uint32_t x) {
   return ((x & 0x000000ffU) << 24) | ((x & 0x0000ff00U) << 8) |
          ((x & 0x00ff0000U) >> 8) | ((x & 0xff000000U) >> 24);
 }
@@ -214,15 +214,20 @@ static void dsha256(const std::vector<uint8_t> &in, uint8_t out[32]) {
   sha256_bytes(tmp, 32, out);
 }
 
-__device__ __forceinline__ static bool hash_words_meet_target(const uint32_t h[8], const uint32_t target[8]) {
+__device__ static uint8_t word_be_byte(uint32_t w, int byte_index) {
+  return (uint8_t)(w >> ((3 - byte_index) * 8));
+}
+
+__device__ static bool hash_words_meet_target(const uint32_t h[8], const uint32_t target[8]) {
   // Bitcoin-style displayed hash is the byte-reversal of the SHA256d digest.
   // Stratum difficulty target is compared against that displayed big-endian value.
   #pragma unroll
-  for (int i = 0; i < 8; i++) {
-    uint32_t hw = bswap32(h[7 - i]);
-    uint32_t tw = target[i];
-    if (hw < tw) return true;
-    if (hw > tw) return false;
+  for (int i = 0; i < 32; i++) {
+    int digest_index = 31 - i;
+    uint8_t hb = word_be_byte(h[digest_index / 4], digest_index % 4);
+    uint8_t tb = word_be_byte(target[i / 4], i % 4);
+    if (hb < tb) return true;
+    if (hb > tb) return false;
   }
   return true;
 }
