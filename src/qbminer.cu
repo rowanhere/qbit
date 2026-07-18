@@ -697,9 +697,8 @@ static void dashboard_loop() {
         << std::setw(10) << "Acc/Rej"
         << std::setw(11) << "Submitted"
         << std::setw(18) << "Job"
-        << std::setw(13) << "Status"
-        << "Event\n";
-    out << std::string(110, '-') << "\n";
+        << "Status\n";
+    out << std::string(92, '-') << "\n";
 
     for (size_t i = 0; i < snap.size(); i++) {
       const auto &g = snap[i];
@@ -712,8 +711,7 @@ static void dashboard_loop() {
           << std::setw(10) << accrej
           << std::setw(11) << g.submitted
           << std::setw(18) << g.last_job.substr(0, 17)
-          << std::setw(13) << g.status.substr(0, 12)
-          << g.last_event.substr(0, 80) << "\n";
+          << g.status.substr(0, 12) << "\n";
     }
 
     std::cout << out.str() << std::flush;
