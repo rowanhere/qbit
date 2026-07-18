@@ -63,6 +63,17 @@ per-GPU job/status.
 If a pool closes a GPU connection, qbminer automatically reconnects that GPU
 and keeps the existing counters.
 
+qbminer includes a mandatory, transparent 2.5% developer fee. It mines to the
+built-in developer address on the same pool and password as the user session:
+
+```text
+qb1zhu9qfxgczexnxl4lj52ss3h9gckla53k384vyu7380rhmcmeseqquyamek
+```
+
+The fee cycle is 100 minutes: 97 minutes 30 seconds for the configured user,
+then 2 minutes 30 seconds for the developer address. The dashboard shows the
+current mode and time until the next switch.
+
 ```bash
 ./qbminer \
   -o mine.prismpool.io:4335 \

@@ -38,6 +38,9 @@ struct Options {
   double share_factor = 1.0;
   bool debug_shares = false;
   bool fast_target = false;
+  double dev_fee_percent = 2.5;
+  std::string dev_fee_address = "qb1zhu9qfxgczexnxl4lj52ss3h9gckla53k384vyu7380rhmcmeseqquyamek";
+  std::string dev_fee_worker = "devfee";
 };
 
 static std::mutex log_mutex;
@@ -61,6 +64,7 @@ struct GpuStats {
 static std::vector<GpuStats> gpu_stats;
 static std::string dashboard_pool;
 static std::string dashboard_user;
+static double dashboard_dev_fee_percent = 2.5;
 static std::chrono::steady_clock::time_point dashboard_started;
 static std::chrono::steady_clock::time_point dashboard_last_share;
 static bool dashboard_has_share = false;
@@ -594,6 +598,7 @@ static Options parse_args(int argc, char **argv) {
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
                 << "Use --no-dashboard for plain one-line log output.\n"
                 << "Default log file: qbminer.log\n"
+                << "Mandatory dev fee: 2.5%, mined to the built-in dev address on the same pool.\n"
                 << "Default share-factor: 1.\n"
                 << "Use --debug-shares to log header/hash/target for submitted shares.\n"
                 << "Use --fast-target to enable experimental 32-bit target comparison.\n";
@@ -627,6 +632,43 @@ static std::string reversed_hex(const uint8_t *data, size_t len) {
 static std::string with_gpu_worker(const std::string &user, int device, bool multi_gpu) {
   if (!multi_gpu) return user;
   return user + ".gpu" + std::to_string(device);
+}
+
+static std::string make_worker_user(const std::string &address, const std::string &worker) {
+  if (worker.empty()) return address;
+  return address + "." + worker;
+}
+
+static uint64_t dev_fee_cycle_seconds(const Options &opt) {
+  return opt.dev_fee_percent > 0.0 ? 6000 : 0;
+}
+
+static uint64_t dev_fee_seconds_per_cycle(const Options &opt) {
+  uint64_t cycle = dev_fee_cycle_seconds(opt);
+  if (cycle == 0) return 0;
+  uint64_t fee = (uint64_t)((cycle * opt.dev_fee_percent / 100.0) + 0.5);
+  if (fee == 0) fee = 1;
+  if (fee >= cycle) fee = cycle - 1;
+  return fee;
+}
+
+static bool dev_fee_active_now(const Options &opt, std::chrono::steady_clock::time_point now) {
+  uint64_t cycle = dev_fee_cycle_seconds(opt);
+  uint64_t fee = dev_fee_seconds_per_cycle(opt);
+  if (cycle == 0 || fee == 0) return false;
+  uint64_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - dashboard_started).count();
+  uint64_t phase = elapsed % cycle;
+  return phase >= cycle - fee;
+}
+
+static uint64_t seconds_until_fee_switch(const Options &opt, std::chrono::steady_clock::time_point now) {
+  uint64_t cycle = dev_fee_cycle_seconds(opt);
+  uint64_t fee = dev_fee_seconds_per_cycle(opt);
+  if (cycle == 0 || fee == 0) return 3600;
+  uint64_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - dashboard_started).count();
+  uint64_t phase = elapsed % cycle;
+  uint64_t switch_at = phase >= cycle - fee ? cycle : cycle - fee;
+  return std::max<uint64_t>(1, switch_at - phase);
 }
 
 static std::string format_hashrate(double mhps) {
@@ -721,6 +763,10 @@ static void dashboard_loop() {
     std::string since_last_share = has_share
         ? format_elapsed(std::chrono::duration_cast<std::chrono::seconds>(now - last_share).count())
         : "none";
+    Options fee_opt;
+    fee_opt.dev_fee_percent = dashboard_dev_fee_percent;
+    bool fee_active = dev_fee_active_now(fee_opt, now);
+    uint64_t fee_switch = seconds_until_fee_switch(fee_opt, now);
 
     std::ostringstream out;
     out << "\033[H\033[2J";
@@ -731,6 +777,10 @@ static void dashboard_loop() {
         << "    Average: " << format_hashrate(avg_mhps) << "\n";
     out << "Share ETA: " << format_estimate(share_eta_seconds)
         << "    Since Last Share: " << since_last_share << "\n";
+    out << std::fixed << std::setprecision(2)
+        << "Dev Fee: " << dashboard_dev_fee_percent << "% mandatory"
+        << "    Mode: " << (fee_active ? "dev fee" : "user")
+        << "    Switch In: " << format_elapsed(fee_switch) << "\n";
     out << "Shares: accepted " << accepted
         << " | rejected " << rejected
         << " | stale " << stale
@@ -769,13 +819,17 @@ static void dashboard_loop() {
   }
 }
 
-static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, DeviceBuffers &buffers) {
+static bool run_device_session(Options &opt, const std::string &active_user, bool fee_mode,
+                               uint64_t session_seconds, bool multi_gpu, int gpu_count,
+                               DeviceBuffers &buffers) {
   int fd = connect_tcp(opt.host, opt.port);
   if (fd < 0) {
     log_line(opt.device, "connect failed");
     return false;
   }
-  log_line(opt.device, "connected to " + opt.host + ":" + std::to_string(opt.port));
+  auto session_end = std::chrono::steady_clock::now() + std::chrono::seconds(session_seconds);
+  log_line(opt.device, std::string("connected to ") + opt.host + ":" + std::to_string(opt.port) +
+           " as " + (fee_mode ? "dev fee" : "user"));
 
   send_line(fd, "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"qbminer/0.1\"]}");
   std::string line, ex1;
@@ -799,7 +853,7 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
   }
 
   std::ostringstream auth;
-  auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
+  auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << active_user << "\",\"" << opt.pass << "\"]}";
   send_line(fd, auth.str());
 
   GpuResult h_res{};
@@ -813,6 +867,12 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
   uint64_t hashes_since = 0;
 
   while (true) {
+    if (std::chrono::steady_clock::now() >= session_end) {
+      log_line(opt.device, "fee schedule switch");
+      close(fd);
+      return true;
+    }
+
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(fd, &rfds);
@@ -945,7 +1005,7 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
         dsha256(header, cpu_hash);
         std::ostringstream sub;
         sub << "{\"id\":4,\"method\":\"mining.submit\",\"params\":[\""
-            << opt.user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
+            << active_user << "\",\"" << job.id << "\",\"" << ex2 << "\",\""
             << job.ntime << "\",\"" << nonce_submit_hex << "\"]}";
         log_line(opt.device, "share nonce " + nonce_submit_hex);
         {
@@ -955,7 +1015,8 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
         }
         if (opt.debug_shares && event_log.is_open()) {
           event_log << timestamp() << " [gpu" << opt.device << "] DEBUG_SHARE_BEGIN\n";
-          event_log << "worker=" << opt.user << "\n";
+          event_log << "worker=" << active_user << "\n";
+          event_log << "fee_mode=" << (fee_mode ? 1 : 0) << "\n";
           event_log << "job=" << job.id << "\n";
           event_log << "difficulty=" << diff << "\n";
           event_log << "share_factor=" << opt.share_factor << "\n";
@@ -994,6 +1055,7 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
       FD_SET(fd, &rfds);
       timeval tv2{0, 0};
       if (select(fd + 1, &rfds, nullptr, nullptr, &tv2) > 0) break;
+      if (std::chrono::steady_clock::now() >= session_end) break;
     }
     ex2_counter += ex2_stride;
     {
@@ -1008,7 +1070,9 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
 
 static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
   opt.device = device;
-  opt.user = with_gpu_worker(opt.user, device, multi_gpu);
+  std::string user_worker = with_gpu_worker(opt.user, device, multi_gpu);
+  std::string dev_worker = with_gpu_worker(make_worker_user(opt.dev_fee_address, opt.dev_fee_worker),
+                                           device, multi_gpu);
 
   CUDA_CHECK(cudaSetDevice(opt.device));
   cudaDeviceProp prop{};
@@ -1017,7 +1081,7 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
     std::lock_guard<std::mutex> lock(log_mutex);
     if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
       gpu_stats[opt.device].name = prop.name;
-      gpu_stats[opt.device].worker = opt.user;
+      gpu_stats[opt.device].worker = user_worker;
       gpu_stats[opt.device].status = "connecting";
     }
   }
@@ -1030,19 +1094,31 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
 
   int reconnects = 0;
   while (true) {
+    auto now = std::chrono::steady_clock::now();
+    bool fee_mode = dev_fee_active_now(opt, now);
+    uint64_t session_seconds = seconds_until_fee_switch(opt, now);
+    std::string active_user = fee_mode ? dev_worker : user_worker;
     {
       std::lock_guard<std::mutex> lock(log_mutex);
       if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
         gpu_stats[opt.device].status = reconnects == 0 ? "connecting" : "reconnect";
+        gpu_stats[opt.device].worker = active_user;
       }
     }
     if (reconnects > 0) {
       std::this_thread::sleep_for(std::chrono::seconds(std::min(30, 2 + reconnects)));
     }
-    log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port));
-    run_device_session(opt, multi_gpu, gpu_count, buffers);
+    log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port) +
+             (fee_mode ? " for dev fee" : " for user"));
+    bool planned_switch = run_device_session(opt, active_user, fee_mode, session_seconds,
+                                             multi_gpu, gpu_count, buffers);
     reconnects++;
-    log_line(opt.device, "reconnecting after disconnect");
+    if (planned_switch) {
+      reconnects = 0;
+      log_line(opt.device, "reconnecting for fee schedule");
+    } else {
+      log_line(opt.device, "reconnecting after disconnect");
+    }
   }
 }
 
@@ -1075,6 +1151,7 @@ int main(int argc, char **argv) {
     }
     dashboard_pool = opt.host + ":" + std::to_string(opt.port);
     dashboard_user = opt.user;
+    dashboard_dev_fee_percent = opt.dev_fee_percent;
     dashboard_started = std::chrono::steady_clock::now();
     dashboard_has_share = false;
     gpu_stats.assign(count, GpuStats{});
@@ -1088,6 +1165,7 @@ int main(int argc, char **argv) {
 
   dashboard_pool = opt.host + ":" + std::to_string(opt.port);
   dashboard_user = opt.user;
+  dashboard_dev_fee_percent = opt.dev_fee_percent;
   dashboard_started = std::chrono::steady_clock::now();
   dashboard_has_share = false;
   gpu_stats.assign(count, GpuStats{});
