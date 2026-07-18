@@ -782,7 +782,7 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
 
   Job job;
   double diff = 1.0;
-  const uint64_t ex2_start = multi_gpu ? (uint64_t)device : 0;
+  const uint64_t ex2_start = multi_gpu ? (uint64_t)opt.device : 0;
   const uint64_t ex2_stride = multi_gpu ? (uint64_t)gpu_count : 1;
   uint64_t ex2_counter = ex2_start;
   auto last_report = std::chrono::steady_clock::now();
