@@ -1,6 +1,6 @@
 # qbminer
 
-Minimal CUDA Stratum miner for Qbit PRISM pool SHA256d mining.
+Minimal CUDA Stratum miner for Qbit SHA256d pool mining.
 
 This is purpose-built for Qbit/PRISM and avoids the old ccminer dependency tree.
 
@@ -52,6 +52,8 @@ By default, qbminer mines on **all CUDA GPUs** it can see. Each GPU opens its ow
 Stratum connection. On multi-GPU systems the worker suffix `.gpuN` is appended.
 Each GPU also walks a separate extranonce2 lane so GPUs do not duplicate work
 even if a pool returns the same extranonce1 on multiple connections.
+The extranonce2 lane keeps advancing across pool work refreshes to avoid
+repeating earlier nonce space.
 Seeing the same job id on every GPU is normal; the pool sends the same block
 template, while each GPU's extranonce and nonce range make the actual work
 unique.

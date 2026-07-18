@@ -838,7 +838,6 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
             gpu_stats[opt.device].status = "mining";
             gpu_stats[opt.device].last_event = "new work";
           }
-          ex2_counter = ex2_start;
         } else {
           log_line(opt.device, "failed to parse notify: " + line);
         }
