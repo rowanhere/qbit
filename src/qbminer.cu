@@ -399,43 +399,24 @@ static bool parse_subscribe(const std::string &line, std::string &ex1, int &ex2_
   size_t r = line.find("\"result\"");
   if (r == std::string::npos) return false;
 
-  size_t compact = line.find("[[]", r);
-  if (compact != std::string::npos) {
-    size_t q1 = line.find('"', compact);
-    if (q1 == std::string::npos) return false;
-    size_t q2 = line.find('"', q1 + 1);
-    if (q2 == std::string::npos) return false;
-    ex1 = line.substr(q1 + 1, q2 - q1 - 1);
-    size_t comma = line.find(',', q2 + 1);
-    if (comma == std::string::npos) return false;
-    ex2_size = atoi(line.c_str() + comma + 1);
-    return !ex1.empty() && ex2_size > 0 && ex2_size < 16;
-  }
+  std::string result = json_array_after_key(line, "result");
+  if (result.empty()) return false;
 
-  // Handles both:
-  // [[["mining.notify","..."],["mining.set_difficulty","..."]],"extranonce1",4]
-  // [[], "extranonce1", 8]
-  size_t result_array = line.find('[', r);
-  if (result_array == std::string::npos) return false;
-  size_t q1 = line.find('"', result_array);
-  while (q1 != std::string::npos) {
-    size_t q2_probe = line.find('"', q1 + 1);
-    if (q2_probe == std::string::npos) return false;
-    std::string candidate = line.substr(q1 + 1, q2_probe - q1 - 1);
-    if (!candidate.empty() && candidate.find('.') == std::string::npos &&
-        candidate.find("mining") == std::string::npos) {
-      break;
-    }
-    q1 = line.find('"', q2_probe + 1);
-  }
+  auto q = quoted_strings(result);
+  if (q.empty()) return false;
+
+  // Stratum subscribe result is [subscriptions, extranonce1, extranonce2_size].
+  // Subscription tuples can contain quoted ids like "1", so extranonce1 is the
+  // last quoted string in the result array, not the first non-method string.
+  ex1 = q.back();
+
+  size_t q1 = result.rfind("\"" + ex1 + "\"");
   if (q1 == std::string::npos) return false;
-  size_t q2 = line.find('"', q1 + 1);
-  if (q2 == std::string::npos) return false;
-  ex1 = line.substr(q1 + 1, q2 - q1 - 1);
+  size_t q2 = q1 + ex1.size() + 1;
 
-  size_t comma = line.find(',', q2 + 1);
+  size_t comma = result.find(',', q2 + 1);
   if (comma == std::string::npos) return false;
-  ex2_size = atoi(line.c_str() + comma + 1);
+  ex2_size = atoi(result.c_str() + comma + 1);
   return !ex1.empty() && ex2_size > 0 && ex2_size < 16;
 }
 
