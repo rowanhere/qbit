@@ -679,7 +679,7 @@ static void dashboard_loop() {
 
     std::ostringstream out;
     out << "\033[H\033[2J";
-    out << "qbminer - Qbit PRISM CUDA miner\n";
+    out << "qbminer - Qbit CUDA miner\n";
     out << "Pool: " << dashboard_pool << "    Address/worker: " << dashboard_user << "\n";
     out << "Uptime: " << format_elapsed(elapsed)
         << "    Total: " << format_hashrate(total_mhps)
