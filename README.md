@@ -85,6 +85,7 @@ Optional flags:
   --log-file <path>  event log file, default qbminer.log
   --share-factor <n> local share check strictness, default 1
   --debug-shares     log submitted header/hash/target details
+  --fast-target      experimental 32-bit target compare; A/B test before using
 ```
 
 For log files or services, use:
@@ -107,6 +108,10 @@ may accept a difficulty request like `-p d=64`, but normal mining should use
 If you see pool rejections with `low difficulty share`, report the raw
 `"id":4` response from `qbminer.log`. Add `--debug-shares` to include the
 submitted header, hash, target, nonce, and submit JSON in the log.
+
+For performance testing only, try `--fast-target` and compare it against the
+default build for at least one accepted share. The default target comparison is
+the conservative known-good path.
 
 ## Architecture Notes
 

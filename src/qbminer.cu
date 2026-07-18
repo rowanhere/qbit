@@ -37,6 +37,7 @@ struct Options {
   std::string log_file = "qbminer.log";
   double share_factor = 1.0;
   bool debug_shares = false;
+  bool fast_target = false;
 };
 
 static std::mutex log_mutex;
@@ -232,6 +233,20 @@ __device__ static bool hash_words_meet_target(const uint32_t h[8], const uint32_
   return true;
 }
 
+__device__ static bool hash_words_meet_target_fast(const uint32_t h[8], const uint32_t target[8]) {
+  // Same comparison as hash_words_meet_target(), grouped into displayed 32-bit words:
+  // displayed bytes are digest[31..0], while h[] stores digest words in big-endian order.
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    uint32_t hw = bswap32(h[7 - i]);
+    uint32_t tw = target[i];
+    if (hw < tw) return true;
+    if (hw > tw) return false;
+  }
+  return true;
+}
+
+template <bool FAST_TARGET>
 __global__ void mine_kernel(const WorkData *work, const uint32_t *target, uint32_t start_nonce, GpuResult *res) {
   uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   uint32_t nonce = start_nonce + idx;
@@ -262,7 +277,8 @@ __global__ void mine_kernel(const WorkData *work, const uint32_t *target, uint32
   final_block[15] = 256;
   sha256_compress_words(s2, final_block);
 
-  if (hash_words_meet_target(s2, target) && atomicCAS(&res->found, 0U, 1U) == 0U) {
+  bool meets = FAST_TARGET ? hash_words_meet_target_fast(s2, target) : hash_words_meet_target(s2, target);
+  if (meets && atomicCAS(&res->found, 0U, 1U) == 0U) {
     res->nonce = nonce;
   }
 }
@@ -564,13 +580,15 @@ static Options parse_args(int argc, char **argv) {
     else if (a == "--log-file") o.log_file = next();
     else if (a == "--share-factor") o.share_factor = atof(next().c_str());
     else if (a == "--debug-shares") o.debug_shares = true;
+    else if (a == "--fast-target") o.fast_target = true;
     else if (a == "-h" || a == "--help") {
-      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path] [--share-factor n] [--debug-shares]\n"
+      std::cout << "qbminer -o host:port -u address.worker -p x [-d device] [-b blocks] [-t threads] [--no-dashboard] [--log-file path] [--share-factor n] [--debug-shares] [--fast-target]\n"
                 << "Default: use all CUDA GPUs. Pass -d N to mine on only GPU N.\n"
                 << "Use --no-dashboard for plain one-line log output.\n"
                 << "Default log file: qbminer.log\n"
                 << "Default share-factor: 1.\n"
-                << "Use --debug-shares to log header/hash/target for submitted shares.\n";
+                << "Use --debug-shares to log header/hash/target for submitted shares.\n"
+                << "Use --fast-target to enable experimental 32-bit target comparison.\n";
       exit(0);
     }
   }
@@ -872,7 +890,11 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
       uint32_t start = (uint32_t)start64;
       h_res.found = 0; h_res.nonce = 0;
       CUDA_CHECK(cudaMemcpy(d_res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
-      mine_kernel<<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
+      if (opt.fast_target) {
+        mine_kernel<true><<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
+      } else {
+        mine_kernel<false><<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
+      }
       CUDA_CHECK(cudaGetLastError());
       CUDA_CHECK(cudaMemcpy(&h_res, d_res, sizeof(h_res), cudaMemcpyDeviceToHost));
       hashes_since += batch;
@@ -924,6 +946,7 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
           event_log << "job=" << job.id << "\n";
           event_log << "difficulty=" << diff << "\n";
           event_log << "share_factor=" << opt.share_factor << "\n";
+          event_log << "fast_target=" << (opt.fast_target ? 1 : 0) << "\n";
           event_log << "extranonce1=" << ex1 << "\n";
           event_log << "extranonce2=" << ex2 << "\n";
           event_log << "extranonce2_lane_start=" << ex2_start << "\n";
