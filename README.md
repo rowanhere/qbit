@@ -74,7 +74,7 @@ Optional flags:
 
 ```text
   -d <device>        CUDA device id; omit to use all GPUs
-  -b <blocks>        CUDA blocks per launch, default 131072
+  -b <blocks>        CUDA blocks per launch, default 262144
   -t <threads>       CUDA threads per block, default 256
   --no-dashboard     plain log output instead of the live terminal dashboard
   --log-file <path>  event log file, default qbminer.log
