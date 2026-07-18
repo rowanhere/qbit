@@ -58,6 +58,8 @@ unique.
 The miner displays a live terminal dashboard with pool, address, uptime, total
 hashrate, average hashrate, per-GPU speed, accepted/rejected/stale shares, and
 per-GPU job/status.
+If a pool closes a GPU connection, qbminer automatically reconnects that GPU
+and keeps the existing counters.
 
 ```bash
 ./qbminer \

@@ -146,7 +146,7 @@ __host__ __device__ static void sha256_compress(uint32_t s[8], const uint8_t blo
   s[0]+=a; s[1]+=b; s[2]+=c; s[3]+=d; s[4]+=e; s[5]+=f; s[6]+=g; s[7]+=h;
 }
 
-__device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
+__host__ __device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
   const uint32_t K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -157,21 +157,22 @@ __device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
     0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
   };
-  uint32_t w[16];
+  uint32_t w[64];
   #pragma unroll
   for (int i = 0; i < 16; i++) w[i] = w0[i];
+  #pragma unroll
+  for (int i = 16; i < 64; i++) {
+    uint32_t s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ (w[i-15] >> 3);
+    uint32_t s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ (w[i-2] >> 10);
+    w[i] = w[i-16] + s0 + w[i-7] + s1;
+  }
 
   uint32_t a=s[0], b=s[1], c=s[2], d=s[3], e=s[4], f=s[5], g=s[6], h=s[7];
   #pragma unroll
   for (int i = 0; i < 64; i++) {
-    if (i >= 16) {
-      uint32_t s0 = rotr32(w[(i + 1) & 15], 7) ^ rotr32(w[(i + 1) & 15], 18) ^ (w[(i + 1) & 15] >> 3);
-      uint32_t s1 = rotr32(w[(i + 14) & 15], 17) ^ rotr32(w[(i + 14) & 15], 19) ^ (w[(i + 14) & 15] >> 10);
-      w[i & 15] += s0 + w[(i + 9) & 15] + s1;
-    }
     uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
     uint32_t ch = (e & f) ^ ((~e) & g);
-    uint32_t t1 = h + S1 + ch + K256[i] + w[i & 15];
+    uint32_t t1 = h + S1 + ch + K256[i] + w[i];
     uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
     uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
     uint32_t t2 = S0 + maj;
@@ -519,6 +520,12 @@ static bool recv_line(int fd, std::string &line) {
   }
 }
 
+struct DeviceBuffers {
+  WorkData *work = nullptr;
+  uint32_t *target = nullptr;
+  GpuResult *res = nullptr;
+};
+
 static std::vector<uint8_t> merkle_root(const Job &job, const std::string &ex1, const std::string &ex2) {
   std::vector<uint8_t> coinbase = hex_to_bytes(job.coinb1 + ex1 + ex2 + job.coinb2);
   uint8_t root[32];
@@ -738,29 +745,13 @@ static void dashboard_loop() {
   }
 }
 
-static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
-  opt.device = device;
-  opt.user = with_gpu_worker(opt.user, device, multi_gpu);
-
-  CUDA_CHECK(cudaSetDevice(opt.device));
-  cudaDeviceProp prop{};
-  CUDA_CHECK(cudaGetDeviceProperties(&prop, opt.device));
-  {
-    std::lock_guard<std::mutex> lock(log_mutex);
-    if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
-      gpu_stats[opt.device].name = prop.name;
-      gpu_stats[opt.device].worker = opt.user;
-      gpu_stats[opt.device].status = "connecting";
-    }
-  }
-  log_line(opt.device, std::string("qbminer CUDA SHA256d on ") + prop.name);
-  log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port));
-
+static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, DeviceBuffers &buffers) {
   int fd = connect_tcp(opt.host, opt.port);
   if (fd < 0) {
     log_line(opt.device, "connect failed");
-    return 1;
+    return false;
   }
+  log_line(opt.device, "connected to " + opt.host + ":" + std::to_string(opt.port));
 
   send_line(fd, "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"qbminer/0.1\"]}");
   std::string line, ex1;
@@ -774,7 +765,8 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
   }
   if (ex1.empty()) {
     log_line(opt.device, "subscribe failed");
-    return 1;
+    close(fd);
+    return false;
   }
   log_line(opt.device, "extranonce1=" + ex1 + " extranonce2_size=" + std::to_string(ex2_size));
   {
@@ -786,12 +778,7 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
   auth << "{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"" << opt.user << "\",\"" << opt.pass << "\"]}";
   send_line(fd, auth.str());
 
-  WorkData *d_work = nullptr;
-  uint32_t *d_target = nullptr;
-  GpuResult *d_res = nullptr, h_res{};
-  CUDA_CHECK(cudaMalloc(&d_work, sizeof(WorkData)));
-  CUDA_CHECK(cudaMalloc(&d_target, 8 * sizeof(uint32_t)));
-  CUDA_CHECK(cudaMalloc(&d_res, sizeof(GpuResult)));
+  GpuResult h_res{};
 
   Job job;
   double diff = 1.0;
@@ -809,7 +796,8 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
     if (select(fd + 1, &rfds, nullptr, nullptr, &tv) > 0) {
       if (!recv_line(fd, line)) {
         log_line(opt.device, "pool disconnected");
-        return 1;
+        close(fd);
+        return false;
       }
       if (line.find("mining.set_difficulty") != std::string::npos) {
         diff = parse_difficulty(line);
@@ -874,28 +862,29 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
     auto prefix = make_header76(job, ex1, ex2);
     if (prefix.size() != 76) {
       log_line(opt.device, "bad header size");
-      return 1;
+      close(fd);
+      return false;
     }
     WorkData work = make_work_data(prefix);
-    CUDA_CHECK(cudaMemcpy(d_work, &work, sizeof(work), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(buffers.work, &work, sizeof(work), cudaMemcpyHostToDevice));
 
     uint8_t target_bytes[32];
     uint32_t target[8];
     share_target_be(diff * opt.share_factor, target_bytes);
     target_words_be(target_bytes, target);
-    CUDA_CHECK(cudaMemcpy(d_target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(buffers.target, target, 8 * sizeof(uint32_t), cudaMemcpyHostToDevice));
     uint32_t batch = (uint32_t)(opt.blocks * opt.threads);
     for (uint64_t start64 = 0; start64 < 0x100000000ULL; start64 += batch) {
       uint32_t start = (uint32_t)start64;
       h_res.found = 0; h_res.nonce = 0;
-      CUDA_CHECK(cudaMemcpy(d_res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
+      CUDA_CHECK(cudaMemcpy(buffers.res, &h_res, sizeof(h_res), cudaMemcpyHostToDevice));
       if (opt.fast_target) {
-        mine_kernel<true><<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
+        mine_kernel<true><<<opt.blocks, opt.threads>>>(buffers.work, buffers.target, start, buffers.res);
       } else {
-        mine_kernel<false><<<opt.blocks, opt.threads>>>(d_work, d_target, start, d_res);
+        mine_kernel<false><<<opt.blocks, opt.threads>>>(buffers.work, buffers.target, start, buffers.res);
       }
       CUDA_CHECK(cudaGetLastError());
-      CUDA_CHECK(cudaMemcpy(&h_res, d_res, sizeof(h_res), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(&h_res, buffers.res, sizeof(h_res), cudaMemcpyDeviceToHost));
       hashes_since += batch;
       {
         std::lock_guard<std::mutex> lock(log_mutex);
@@ -988,6 +977,47 @@ static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
         gpu_stats[opt.device].last_event = "next extranonce " + std::to_string(ex2_counter);
       }
     }
+  }
+  return false;
+}
+
+static int run_device(Options opt, int device, bool multi_gpu, int gpu_count) {
+  opt.device = device;
+  opt.user = with_gpu_worker(opt.user, device, multi_gpu);
+
+  CUDA_CHECK(cudaSetDevice(opt.device));
+  cudaDeviceProp prop{};
+  CUDA_CHECK(cudaGetDeviceProperties(&prop, opt.device));
+  {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
+      gpu_stats[opt.device].name = prop.name;
+      gpu_stats[opt.device].worker = opt.user;
+      gpu_stats[opt.device].status = "connecting";
+    }
+  }
+  log_line(opt.device, std::string("qbminer CUDA SHA256d on ") + prop.name);
+
+  DeviceBuffers buffers;
+  CUDA_CHECK(cudaMalloc(&buffers.work, sizeof(WorkData)));
+  CUDA_CHECK(cudaMalloc(&buffers.target, 8 * sizeof(uint32_t)));
+  CUDA_CHECK(cudaMalloc(&buffers.res, sizeof(GpuResult)));
+
+  int reconnects = 0;
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lock(log_mutex);
+      if (opt.device >= 0 && opt.device < (int)gpu_stats.size()) {
+        gpu_stats[opt.device].status = reconnects == 0 ? "connecting" : "reconnect";
+      }
+    }
+    if (reconnects > 0) {
+      std::this_thread::sleep_for(std::chrono::seconds(std::min(30, 2 + reconnects)));
+    }
+    log_line(opt.device, "Connecting to " + opt.host + ":" + std::to_string(opt.port));
+    run_device_session(opt, multi_gpu, gpu_count, buffers);
+    reconnects++;
+    log_line(opt.device, "reconnecting after disconnect");
   }
 }
 
