@@ -62,6 +62,8 @@ static std::vector<GpuStats> gpu_stats;
 static std::string dashboard_pool;
 static std::string dashboard_user;
 static std::chrono::steady_clock::time_point dashboard_started;
+static std::chrono::steady_clock::time_point dashboard_last_share;
+static bool dashboard_has_share = false;
 static std::atomic<bool> dashboard_done{false};
 static bool dashboard_interactive = true;
 
@@ -646,6 +648,11 @@ static std::string format_elapsed(uint64_t seconds) {
   return buf;
 }
 
+static std::string format_estimate(double seconds) {
+  if (seconds <= 0.0 || seconds > 315360000.0) return "-";
+  return format_elapsed((uint64_t)(seconds + 0.5));
+}
+
 static void log_line(int device, const std::string &msg) {
   std::lock_guard<std::mutex> lock(log_mutex);
   if (device >= 0 && device < (int)gpu_stats.size()) {
@@ -686,19 +693,34 @@ static void dashboard_loop() {
     }
 
     double total_mhps = 0.0;
+    double pool_diff = 0.0;
     uint64_t total_hashes = 0, submitted = 0, accepted = 0, rejected = 0, stale = 0;
+    bool has_share = false;
+    std::chrono::steady_clock::time_point last_share;
     for (const auto &g : snap) {
       total_mhps += g.mhps;
+      pool_diff = std::max(pool_diff, g.difficulty);
       total_hashes += g.total_hashes;
       submitted += g.submitted;
       accepted += g.accepted;
       rejected += g.rejected;
       stale += g.stale;
     }
+    {
+      std::lock_guard<std::mutex> lock(log_mutex);
+      has_share = dashboard_has_share;
+      last_share = dashboard_last_share;
+    }
 
     auto now = std::chrono::steady_clock::now();
     uint64_t elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - dashboard_started).count();
     double avg_mhps = elapsed > 0 ? (double)total_hashes / (double)elapsed / 1e6 : 0.0;
+    double share_eta_seconds = (total_mhps > 0.0 && pool_diff > 0.0)
+        ? (pool_diff * 4294967296.0) / (total_mhps * 1000000.0)
+        : 0.0;
+    std::string since_last_share = has_share
+        ? format_elapsed(std::chrono::duration_cast<std::chrono::seconds>(now - last_share).count())
+        : "none";
 
     std::ostringstream out;
     out << "\033[H\033[2J";
@@ -707,6 +729,8 @@ static void dashboard_loop() {
     out << "Uptime: " << format_elapsed(elapsed)
         << "    Total: " << format_hashrate(total_mhps)
         << "    Average: " << format_hashrate(avg_mhps) << "\n";
+    out << "Share ETA: " << format_estimate(share_eta_seconds)
+        << "    Since Last Share: " << since_last_share << "\n";
     out << "Shares: accepted " << accepted
         << " | rejected " << rejected
         << " | stale " << stale
@@ -823,6 +847,8 @@ static bool run_device_session(Options &opt, bool multi_gpu, int gpu_count, Devi
         std::string verdict;
         if (line.find("\"result\": true") != std::string::npos || line.find("\"result\":true") != std::string::npos) {
           gpu_stats[opt.device].accepted++;
+          dashboard_last_share = std::chrono::steady_clock::now();
+          dashboard_has_share = true;
           verdict = "share accepted";
           gpu_stats[opt.device].last_event = verdict;
         } else if (line.find("stale") != std::string::npos) {
@@ -1051,6 +1077,7 @@ int main(int argc, char **argv) {
     dashboard_pool = opt.host + ":" + std::to_string(opt.port);
     dashboard_user = opt.user;
     dashboard_started = std::chrono::steady_clock::now();
+    dashboard_has_share = false;
     gpu_stats.assign(count, GpuStats{});
     std::thread dashboard;
     if (dashboard_interactive) dashboard = std::thread(dashboard_loop);
@@ -1063,6 +1090,7 @@ int main(int argc, char **argv) {
   dashboard_pool = opt.host + ":" + std::to_string(opt.port);
   dashboard_user = opt.user;
   dashboard_started = std::chrono::steady_clock::now();
+  dashboard_has_share = false;
   gpu_stats.assign(count, GpuStats{});
   std::thread dashboard;
   if (dashboard_interactive) dashboard = std::thread(dashboard_loop);
