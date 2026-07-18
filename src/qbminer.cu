@@ -146,7 +146,7 @@ __host__ __device__ static void sha256_compress(uint32_t s[8], const uint8_t blo
   s[0]+=a; s[1]+=b; s[2]+=c; s[3]+=d; s[4]+=e; s[5]+=f; s[6]+=g; s[7]+=h;
 }
 
-__host__ __device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
+__device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0[16]) {
   const uint32_t K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -157,22 +157,21 @@ __host__ __device__ static void sha256_compress_words(uint32_t s[8], uint32_t w0
     0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
   };
-  uint32_t w[64];
+  uint32_t w[16];
   #pragma unroll
   for (int i = 0; i < 16; i++) w[i] = w0[i];
-  #pragma unroll
-  for (int i = 16; i < 64; i++) {
-    uint32_t s0 = rotr32(w[i-15], 7) ^ rotr32(w[i-15], 18) ^ (w[i-15] >> 3);
-    uint32_t s1 = rotr32(w[i-2], 17) ^ rotr32(w[i-2], 19) ^ (w[i-2] >> 10);
-    w[i] = w[i-16] + s0 + w[i-7] + s1;
-  }
 
   uint32_t a=s[0], b=s[1], c=s[2], d=s[3], e=s[4], f=s[5], g=s[6], h=s[7];
   #pragma unroll
   for (int i = 0; i < 64; i++) {
+    if (i >= 16) {
+      uint32_t s0 = rotr32(w[(i + 1) & 15], 7) ^ rotr32(w[(i + 1) & 15], 18) ^ (w[(i + 1) & 15] >> 3);
+      uint32_t s1 = rotr32(w[(i + 14) & 15], 17) ^ rotr32(w[(i + 14) & 15], 19) ^ (w[(i + 14) & 15] >> 10);
+      w[i & 15] += s0 + w[(i + 9) & 15] + s1;
+    }
     uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
     uint32_t ch = (e & f) ^ ((~e) & g);
-    uint32_t t1 = h + S1 + ch + K256[i] + w[i];
+    uint32_t t1 = h + S1 + ch + K256[i] + w[i & 15];
     uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
     uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
     uint32_t t2 = S0 + maj;
